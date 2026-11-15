@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Wine finder</title>
+<style>
+  :root { --bg:#14171a; --card:#1f2428; --ink:#f2f4f5; --dim:#9aa5ad; --go:#2e9e5b; --stop:#c0392b; --hi:#ffd166; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:12px 16px 16px; background:var(--bg); color:var(--ink);
+         font-family:-apple-system, Roboto, "Segoe UI", sans-serif; }
+  h1 { font-size:16px; margin:0 0 8px; color:var(--dim); font-weight:600; }
+  #status { color:var(--dim); font-size:15px; min-height:22px; margin:10px 0 0; }
+  /* The two big buttons. Whichever one works best on this phone is the green one. */
+  #mic, #start { width:100%; margin-top:10px; border:0; border-radius:14px; font-weight:700; color:#fff; }
+  #mic { padding:26px 12px; font-size:24px; background:var(--go); }
+  #mic.on { background:var(--stop); }
+  #mic:disabled { opacity:.6; }
+  #start { padding:14px 12px; font-size:18px; background:#3a424a; }
+  #start[hidden] { display:none; }
+  /* On the Google page: the big button that opens this same page outside Google. */
+  #handover { display:block; width:100%; margin-top:10px; padding:26px 12px; font-size:24px; font-weight:700;
+              border-radius:14px; color:#fff; background:var(--go); text-align:center; text-decoration:none; }
+  #handover[hidden] { display:none; }
+  body.handover.nomic #start { padding:14px 12px; font-size:18px; background:#3a424a; }
+  body.typing #handover { padding:9px 12px; font-size:16px; background:#3a424a; }
+  /* No list on this phone yet: only the instructions and the list box show. */
+  body.nolist .row, body.nolist #mic, body.nolist #start, body.nolist label { display:none; }
+  #listbox { margin-top:22px; color:var(--dim); font-size:16px; line-height:1.4; }
+  #listbox[hidden] { display:none; }
+  #listbox summary { padding:8px 0; font-weight:600; }
+  #listbox textarea { width:100%; height:120px; margin-top:8px; padding:10px; font-size:16px; border-radius:12px;
+                      border:1px solid #3a424a; background:var(--card); color:var(--ink); }
+  #listbox button { margin:8px 8px 0 0; padding:12px 14px; font-size:16px; border:0; border-radius:12px;
+                    background:#3a424a; color:var(--ink); }
+  #listbox #savelist { background:var(--go); color:#fff; font-weight:700; }
+  /* While the keyboard is up the Speak button slims down, so the answer stays in view. */
+  body.typing #mic, body.typing.nomic #mic { padding:9px 12px; font-size:16px; background:#3a424a; }
+  body.nomic #start { padding:26px 12px; font-size:24px; background:var(--go); }
+  body.nomic #mic { padding:14px 12px; font-size:18px; background:#3a424a; }
+  body.nomic #mic.on { background:var(--stop); }
+  .row { display:flex; gap:8px; }
+  #typed { flex:1; min-width:0; font-size:22px; padding:12px; border-radius:12px;
+           border:1px solid #3a424a; background:var(--card); color:var(--ink); }
+  #typed::placeholder { font-size:17px; color:var(--dim); }
+  .row button { font-size:17px; padding:0 14px; border-radius:12px; border:0;
+        background:#3a424a; color:var(--ink); }
+  label { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:16px; color:var(--dim); }
+  label input { width:22px; height:22px; }
+  #result { margin-top:10px; background:var(--card); border-radius:14px; padding:14px; min-height:150px; }
+  #result .line { color:var(--dim); font-size:16px; line-height:1.4; }
+  #result .desc { font-size:21px; font-weight:700; margin:4px 0 10px; }
+  .loc { display:flex; gap:8px; }
+  .loc div { flex:1; background:#2a3137; border-radius:12px; padding:8px 4px; text-align:center; }
+  .loc small { display:block; color:var(--dim); font-size:13px; text-transform:uppercase; letter-spacing:.05em; }
+  .loc b { font-size:44px; color:var(--hi); line-height:1.1; }
+  .loc .bay { flex:1.6; background:#3b3413; }
+  .loc .bay b { font-size:64px; }
+  .extra { color:var(--dim); margin-top:8px; font-size:15px; }
+  .miss { font-size:22px; color:#ff8a80; font-weight:700; }
+  #problem { display:none; margin-top:12px; padding:14px; border-radius:12px; background:#5a1f1a; color:#fff; font-size:16px; line-height:1.4; }
+  #problem b { display:block; font-size:18px; margin-bottom:6px; }
+  #problem small { display:block; margin-top:8px; opacity:.75; }
+  #history { margin-top:16px; padding:0; list-style:none; }
+  #history li { padding:12px 4px; border-bottom:1px solid #2a3137; font-size:24px; line-height:1.25; color:var(--dim); }
+  #history li b { color:var(--ink); }
+  #history .h-loc { color:var(--ink); margin:2px 0; }
+  #history .h-loc b { color:var(--hi); }
+  #history .h-loc span { white-space:nowrap; margin-right:.45em; }
+</style>
+</head>
+<body onload="focusBox()">
+<h1>Wine finder</h1>
+<form class="row" name="finder" onsubmit="return false">
+  <input id="typed" name="lineno" type="text" inputmode="text" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" enterkeyhint="search" placeholder="Loading…">
+  <button type="button" id="kb" title="Switch keyboard">123</button>
+  <button type="button" id="go">Find</button>
+</form>
+<button type="button" id="mic" disabled>Loading…</button>
+<a id="handover" target="_top" hidden>🎙️ Open the speaking page</a>
+<button type="button" id="start">⌨️ Use the keyboard</button>
+<div id="problem"></div>
+<div id="result"><div class="line" id="hint">Loading your list…</div></div>
+<div id="status"></div>
+<label><input type="checkbox" id="speak" checked> Say the location out loud</label>
+<ul id="history"></ul>
+<details id="listbox" hidden>
+  <summary>Your list on this phone</summary>
+  <div id="listinfo"></div>
+  <textarea id="paste" placeholder="To add or replace the list by hand: copy the rows from your sheet (columns A to G, with the heading row) and paste them here."></textarea>
+  <button type="button" id="savelist">Save pasted list</button>
+  <button type="button" id="droplist">Remove the list from this phone</button>
+</details>
+
+<script>
+var rows = [], byLine = {}, listening = false, speaking = false, rec = null, wake = null;
+var $ = function (id) { return document.getElementById(id); };
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var UA = navigator.userAgent;
+var IOS = /iPhone|iPad|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// This one file is used in two places. Inside your Google Sheet's web app it reads
+// the sheet. Hosted as its own page outside Google it keeps a copy of the list on
+// the phone, because that is the only place an iPhone lets a page listen by itself.
+var IN_GOOGLE = !!(window.google && google.script && google.script.run);
+// Where the copy outside Google lives. The Google page hands the list over to it.
+var SPEAK_PAGE = 'https://tomtubbs.github.io/product-finder/';
+// Phones only bring up the keyboard when you touch the screen, so there a
+// button does the job instead of the page trying by itself.
+var TOUCH = IOS || !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+
+function store(k, v) {
+  try { if (v === undefined) return localStorage.getItem('wf_' + k); localStorage.setItem('wf_' + k, v); } catch (e) {}
+  return null;
+}
+
+function setRows(data) {
+  rows = data; byLine = {};
+  data.forEach(function (r) { (byLine[r.line] = byLine[r.line] || []).push(r); });
+  document.body.classList.remove('nolist');
+  // An iPhone never lets a page inside Google's page listen by itself.
+  var canListen = SR && !(IN_GOOGLE && IOS);
+  $('mic').style.display = canListen ? '' : 'none';
+  $('mic').disabled = false;
+  document.body.classList.toggle('nomic', !canListen || store('mic') === 'blocked');
+  paint();
+  $('typed').placeholder = 'Say or type line no';
+  var voice = '<b style="color:var(--ink)">To use your voice:</b> ';
+  var keys = 'tap <b>Use the keyboard</b>, then the microphone key on the keyboard. You can also type a number.';
+  if (canListen) {
+    hint(voice + 'tap <b>Speak a line number</b> and read out line numbers one at a time.<br>' +
+      'If the phone will not let the page listen, ' + keys);
+  } else {
+    hint(voice + keys);
+  }
+  status(data.length + ' lines loaded.');
+  if (IN_GOOGLE && SPEAK_PAGE && data.length) offerHandover(data, canListen);
+  focusBox();
+}
+
+/** On the Google page: a button that opens this same page outside Google and hands
+ *  it the list. The list travels in the part of the link after the #, which stays
+ *  on the phone and is never sent to any website. */
+function offerHandover(data, canListen) {
+  packRows(data).then(function (packed) {
+    $('handover').href = SPEAK_PAGE + '#' + packed;
+    $('handover').hidden = false;
+    document.body.classList.add('handover');
+    if (!canListen) {
+      hint('<b style="color:var(--ink)">For one-tap voice:</b> tap <b>Open the speaking page</b>. ' +
+        'It opens Wine finder outside Google, where the iPhone lets it listen, and takes today\'s list with it. ' +
+        'The list stays on this phone.<br>Or stay here: tap <b>Use the keyboard</b>, then the microphone key.');
+    }
+  }, function () {});
+}
+
+function b64(bytes) {
+  var t = '';
+  for (var i = 0; i < bytes.length; i += 8192) t += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  return btoa(t).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function unb64(t) {
+  var raw = atob(t.replace(/-/g, '+').replace(/_/g, '/')), out = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+/** Squash a stream of bytes with the browser's own zip, or unsquash it. */
+function pipe(bytes, stream) {
+  var w = stream.writable.getWriter(), quiet = function () {};
+  w.write(bytes).catch(quiet); w.close().catch(quiet);
+  return new Response(stream.readable).arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+}
+/** The list as text that fits in a link: "z." squashed, or "j." plain. */
+function packRows(data) {
+  var bytes = new TextEncoder().encode(JSON.stringify(data.map(function (r) {
+    return [r.line, r.wine, r.bay, r.shelf, r.seq, r.fac, r.desc];
+  })));
+  var plain = function () { return 'j.' + b64(bytes); };
+  if (!window.CompressionStream || !window.DecompressionStream) return Promise.resolve(plain());
+  try {
+    return pipe(bytes, new CompressionStream('deflate-raw')).then(function (z) { return 'z.' + b64(z); }, plain);
+  } catch (e) { return Promise.resolve(plain()); }
+}
+function unpackRows(packed) {
+  var bytes = unb64(packed.slice(2));
+  var ready = packed.charAt(0) === 'z' ? pipe(bytes, new DecompressionStream('deflate-raw')) : Promise.resolve(bytes);
+  return ready.then(function (b) {
+    var list = JSON.parse(new TextDecoder().decode(b)), out = [];
+    list.forEach(function (a) {
+      var line = String(a[0] || '').replace(/\D/g, '');
+      if (line) out.push({ line: line, wine: txt(a[1]), bay: txt(a[2]), shelf: txt(a[3]), seq: txt(a[4]), fac: txt(a[5]), desc: txt(a[6]) });
+    });
+    return out;
+  });
+}
+function txt(v) { return v === undefined || v === null ? '' : String(v).trim(); }
+function status(t) { $('status').textContent = t; }
+/** The instructions shown in the answer card until the first answer replaces them. */
+function hint(html) { var h = $('hint'); if (h) h.innerHTML = html; }
+
+/** Put the cursor in the number box. Called when the page loads (from the body's
+ *  onload), again when the list has arrived, and whenever you come back to the page. */
+function focusBox() {
+  if (TOUCH || listening) return;
+  try { window.focus(); document.finder.lineno.focus(); } catch (e) {}
+}
+
+/** The keyboard button: puts the cursor in the box and brings up the full keyboard
+ *  (the one with the microphone key), all inside the tap as the iPhone requires.
+ *  It hides while the box is in use and comes back when the keyboard is put away. */
+function grabBox() {
+  if ($('typed').getAttribute('inputmode') !== 'text') setKeyboard('text', false);
+  $('typed').blur(); $('typed').focus();
+}
+function paintStart() {
+  var typing = document.activeElement === $('typed');
+  $('start').hidden = typing;
+  document.body.classList.toggle('typing', typing && TOUCH);
+}
+window.addEventListener('pageshow', focusBox);
+// Some browsers ignore the first request, so ask again after a short wait: at
+// half a second, 1, 2, 3.5 and 5 seconds after the page opens. This stops as
+// soon as you touch the page, so it never fights with what you are doing.
+var touched = false;
+['touchstart', 'mousedown', 'keydown'].forEach(function (ev) {
+  document.addEventListener(ev, function () { touched = true; }, true);
+});
+[500, 1000, 2000, 3500, 5000].forEach(function (ms) {
+  setTimeout(function () { if (!touched) focusBox(); }, ms);
+});
+window.addEventListener('focus', function () { if (document.activeElement !== $('typed')) focusBox(); });
+document.addEventListener('visibilitychange', function () { if (!document.hidden) focusBox(); });
+
+var WORDS = { zero:'0', oh:'0', nought:'0', one:'1', two:'2', three:'3', four:'4', five:'5',
+  six:'6', seven:'7', eight:'8', nine:'9' };
+// Sound-alikes, only trusted when the page's own listening is on.
+var LOOSE = { o:'0', won:'1', to:'2', too:'2', 'for':'4', ate:'8' };
+
+/** Turn what was heard into digits, e.g. "five six 4 double 7 eight" -> 564778 */
+function toDigits(text, strict) {
+  var out = '', rep = 1;
+  String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').forEach(function (w) {
+    if (w === 'double') { rep = 2; return; }
+    if (w === 'triple' || w === 'treble') { rep = 3; return; }
+    var d = /^\d+$/.test(w) ? w : (WORDS[w] || (strict ? undefined : LOOSE[w]));
+    if (d === undefined) { rep = 1; return; }
+    out += (rep > 1 && d.length === 1) ? new Array(rep + 1).join(d) : d;
+    rep = 1;
+  });
+  return out;
+}
+
+/** Find a known line number in the digits heard. */
+function match(digits) {
+  if (!digits) return null;
+  if (byLine[digits]) return digits;
+  var best = null;
+  Object.keys(byLine).forEach(function (line) {
+    if (digits.indexOf(line) > -1 && (!best || line.length > best.length)) best = line;
+  });
+  return best;
+}
+
+var lastShown = '', lastShownAt = 0;
+
+function showLine(line) {
+  var hits = byLine[line], html = '', spoken = [];
+  hits.forEach(function (r) {
+    html += '<div class="line">Line ' + esc(r.line) + (r.wine ? ' · ' + esc(r.wine) : '') + '</div>' +
+      '<div class="desc">' + esc(r.desc) + '</div>' +
+      '<div class="loc"><div class="bay"><small>Bay</small><b>' + esc(r.bay) + '</b></div>' +
+      '<div><small>Shelf</small><b>' + esc(r.shelf) + '</b></div>' +
+      '<div><small>Position</small><b>' + esc(r.seq) + '</b></div></div>' +
+      (r.fac ? '<div class="extra">' + esc(r.fac) + ' facing' + (r.fac == 1 ? '' : 's') + '</div>' : '');
+    spoken.push('Bay ' + r.bay + ', shelf ' + r.shelf + ', position ' + r.seq);
+  });
+  $('result').innerHTML = html;
+  if (line !== lastShown) {
+    var r0 = hits[0], li = document.createElement('li');
+    li.innerHTML = '<div><b>' + esc(r0.line) + '</b>' + (r0.wine ? ' · ' + esc(r0.wine) : '') + '</div>' +
+      '<div class="h-loc"><span>Bay <b>' + esc(r0.bay) + '</b></span> <span>Shelf <b>' + esc(r0.shelf) +
+      '</b></span> <span>Position <b>' + esc(r0.seq) + '</b></span></div>' +
+      '<div>' + esc(r0.desc) + '</div>';
+    $('history').insertBefore(li, $('history').firstChild);
+  }
+  lastShown = line; lastShownAt = Date.now();
+  say(line.split('').join(' ') + '. ' + spoken.join('. Also, '));
+}
+
+function showMiss(digits) {
+  $('result').innerHTML = '<div class="line">Heard ' + esc(digits) + '</div><div class="miss">Not in the sheet</div>';
+  lastShown = ''; 
+  say('Line ' + digits.split('').join(' ') + ' not found');
+}
+
+/** One whole phrase or typed entry: find it, show it. */
+function lookup(text, strict) {
+  var digits = toDigits(text, strict);
+  if (!digits) return false;
+  var line = match(digits);
+  if (line) { showLine(line); return true; }
+  if (digits.length < 4) return false;   // probably background chatter
+  showMiss(digits);
+  return true;
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
+  return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]; }); }
+
+var sayId = 0;
+function say(text) {
+  if (!$('speak').checked || !window.speechSynthesis) return;
+  speaking = true;
+  dropRec();                                   // don't listen to ourselves
+  var u = new SpeechSynthesisUtterance(text), mine = ++sayId;
+  u.rate = 1.05;
+  function done() {
+    if (mine !== sayId) return;                // a newer answer has taken over
+    sayId++; clearTimeout(giveUp);
+    speaking = false; lastShownAt = Date.now();
+    if (listening) startRec();
+  }
+  u.onend = u.onerror = done;
+  // If the phone never tells us the speaking has finished, carry on anyway.
+  var giveUp = setTimeout(done, 2500 + text.length * 110);
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+/* ---------- The box: typed numbers, or numbers dictated with the keyboard mic ---------- */
+// Text arrives a bit at a time, so we wait for a short pause, look for a known
+// line number, answer it, and empty the box ready for the next one. The answer
+// stays on screen until the next number is dealt with.
+var seenValue = '', evalTimer = null, missTimer = null, idleTimer = null;
+var ghost = '';   // what was in the box when we last emptied it
+var voiceText = false;   // the box is holding words from the Speak button, not the keyboard
+var MIN_LEN = 4, ECHO_MS = 2500;
+
+/** The new text in the box. iPhone dictation sometimes puts back text we have
+ *  already emptied, in front of the new words, so that part is ignored. */
+function boxText() {
+  var v = $('typed').value;
+  return (ghost && v.length > ghost.length && v.indexOf(ghost) === 0) ? v.slice(ghost.length) : v;
+}
+
+function boxChanged() {
+  seenValue = $('typed').value;
+  clearTimeout(evalTimer); clearTimeout(missTimer); clearTimeout(idleTimer);
+  evalTimer = setTimeout(evaluate, 700);
+  // Stray words with no line number in them are tidied away after a quiet spell.
+  idleTimer = setTimeout(function () { if ($('typed').value) wipe(); }, 6000);
+}
+
+/** Last known line number inside these digits, or null. */
+function findLast(digits) {
+  var best = null;
+  Object.keys(byLine).forEach(function (line) {
+    if (line.length < MIN_LEN) return;
+    var i = digits.lastIndexOf(line);
+    if (i < 0) return;
+    var end = i + line.length;
+    if (!best || end > best.end || (end === best.end && line.length > best.line.length)) best = { line: line, end: end };
+  });
+  return best ? best.line : null;
+}
+
+function evaluate() {
+  var strict = !voiceText, digits = toDigits(boxText(), strict);
+  if (!digits) return;
+  var line = findLast(digits);
+  if (line) {
+    // The same number arriving again straight away is dictation tidying up its
+    // text, or overhearing our own spoken answer, so it is not answered twice.
+    var echo = line === lastShown && (speaking || Date.now() - lastShownAt < ECHO_MS);
+    wipe();
+    if (!echo) showLine(line);
+    return;
+  }
+  if (digits.length >= MIN_LEN) {
+    missTimer = setTimeout(function () {
+      if (toDigits(boxText(), strict) !== digits) return;
+      wipe();
+      showMiss(digits.slice(-8));
+    }, 1300);
+  }
+}
+
+/** Empty the box, remembering what was in it. */
+function wipe() {
+  var t = $('typed');
+  if (t.value) ghost = t.value;
+  t.value = ''; seenValue = '';
+  clearTimeout(evalTimer); clearTimeout(missTimer); clearTimeout(idleTimer);
+  // Words from the Speak button: start a fresh listen so they are not heard twice.
+  if (voiceText) { voiceText = false; ghost = ''; dropRec(); }
+}
+function clearBox() { wipe(); ghost = ''; }
+
+$('typed').addEventListener('input', boxChanged);
+// Some keyboards do not report dictated text as it arrives, so also keep an eye on the box.
+setInterval(function () { if ($('typed').value !== seenValue) boxChanged(); }, 500);
+$('typed').addEventListener('focus', function () {
+  // The keyboard and the Speak button cannot both have the microphone.
+  if (listening) { stopListening(); status('Speak button off while you use the keyboard.'); }
+  clearBox(); keepAwake(); paintStart();
+});
+$('typed').addEventListener('blur', function () { setTimeout(paintStart, 250); });
+$('start').onclick = grabBox;
+
+function typedGo() {
+  var v = boxText();
+  clearBox();
+  if (!lookup(v, true) && v.trim()) status('No line number in that.');
+}
+$('go').onclick = typedGo;
+$('typed').onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); typedGo(); } };
+
+function setKeyboard(mode, refocus) {
+  $('typed').setAttribute('inputmode', mode);
+  $('kb').textContent = mode === 'numeric' ? 'Mic' : '123';
+  store('kb', mode);
+  if (refocus) { $('typed').blur(); $('typed').focus(); }
+}
+$('kb').onclick = function () {
+  setKeyboard($('typed').getAttribute('inputmode') === 'numeric' ? 'text' : 'numeric', true);
+};
+setKeyboard(store('kb') === 'numeric' ? 'numeric' : 'text', false);
+
+if (store('speak') === '0') $('speak').checked = false;
+$('speak').onchange = function () { store('speak', this.checked ? '1' : '0'); if (!this.checked && window.speechSynthesis) speechSynthesis.cancel(); };
+
+function keepAwake() {
+  if (wake || !navigator.wakeLock) return;
+  try { navigator.wakeLock.request('screen').then(function (w) { wake = w; w.addEventListener('release', function () { wake = null; }); }, function () {}); } catch (e) {}
+}
+// iPhone only lets a page speak after a tap, so use the first tap to unlock it.
+var unlocked = false;
+function unlockSpeech() {
+  if (unlocked || !window.speechSynthesis) return;
+  unlocked = true;
+  try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (e) {}
+}
+document.addEventListener('touchend', unlockSpeech, true);
+document.addEventListener('click', unlockSpeech, true);
+
+/* ---------- The Speak button: the page listens by itself (Web Speech API) ---------- */
+// One tap starts it. What is heard is dropped into the number box, so it is answered
+// and cleared exactly like typed or keyboard-dictated numbers. After each answer the
+// page starts a fresh listen, so you can read out number after number.
+var deaf = true;            // ignore anything the current listen reports (it is being reset)
+var everStarted = false;    // listening has worked at least once since the page opened
+var startedAt = 0, quickEnds = 0, startTimer = null, kickTimer = null;
+
+function startRec() {
+  clearTimeout(kickTimer);
+  if (!SR || !listening || speaking) return;
+  if (rec) { dropRec(); return; }              // one at a time; we are called back when it ends
+  var r;
+  try { r = new SR(); } catch (e) { fail('start-failed', e.message); return; }
+  r.lang = 'en-GB';
+  r.continuous = true;
+  r.interimResults = true;
+  r.maxAlternatives = 3;
+  r.onstart = function () {
+    if (rec !== r) return;
+    everStarted = true; problem('');
+    clearTimeout(startTimer);
+    status('Listening. Read out a line number.');
+  };
+  r.onresult = function (ev) {
+    if (rec !== r || deaf || speaking || !listening) return;
+    quickEnds = 0;
+    if (store('mic') === 'blocked') setBlocked(false);   // it works here after all
+    var text = '', last = ev.results[ev.results.length - 1];
+    for (var i = 0; i < ev.results.length; i++) text += pick(ev.results[i]) + ' ';
+    text = text.trim();
+    if (!text) return;
+    voiceText = true;
+    $('typed').value = text;
+    boxChanged();
+    status('Heard: "' + text + '"');
+    // A finished phrase with a real line number in it is answered straight away.
+    if (last && last.isFinal && findLast(toDigits(text))) { clearTimeout(evalTimer); evaluate(); }
+  };
+  r.onerror = function (ev) {
+    if (rec !== r) return;
+    if (ev.error === 'no-speech' || ev.error === 'aborted') return;   // normal pauses
+    fail(ev.error, ev.message);
+  };
+  r.onend = function () {
+    if (rec !== r) return;
+    rec = null;
+    if (!listening || speaking) return;
+    // It stopped by itself (a long pause) or we asked it to start afresh: go again.
+    quickEnds = (Date.now() - startedAt < 1000) ? quickEnds + 1 : 0;
+    if (quickEnds >= 5) { fail('keeps-stopping'); return; }
+    kickTimer = setTimeout(startRec, 250);
+  };
+  rec = r; deaf = false; startedAt = Date.now();
+  try { r.start(); } catch (e) { rec = null; fail('start-failed', e.message); return; }
+  clearTimeout(startTimer);
+  startTimer = setTimeout(function () {
+    if (listening && rec === r && !everStarted) status('Waiting for the microphone. If the phone asks, tap Allow.');
+  }, 5000);
+}
+
+/** The best wording of one heard phrase: one with a real line number in it, if any. */
+function pick(alts) {
+  for (var a = 0; a < alts.length; a++) {
+    if (findLast(toDigits(alts[a].transcript))) return alts[a].transcript;
+  }
+  return alts[0].transcript;
+}
+
+/** Forget what has been heard so far. Listening starts again once this one has ended. */
+function dropRec() {
+  deaf = true;
+  var old = rec;
+  if (!old) return;
+  try { old.abort(); } catch (e) {}
+  // If the phone never reports that it ended, carry on anyway.
+  setTimeout(function () {
+    if (rec !== old) return;
+    rec = null;
+    if (listening && !speaking) startRec();
+  }, 1500);
+}
+
+function stopListening() {
+  listening = false;
+  clearTimeout(startTimer); clearTimeout(kickTimer);
+  dropRec();
+  if (voiceText) clearBox();
+  if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+  paint();
+}
+
+/** Remember whether this phone lets the page listen, so the right button is the big green one. */
+function setBlocked(yes) {
+  document.body.classList.toggle('nomic', yes);
+  store('mic', yes ? 'blocked' : 'ok');
+  paint();
+}
+
+function fail(code, detail) {
+  stopListening();
+  if (!everStarted && /^(not-allowed|service-not-allowed|start-failed)$/.test(code)) setBlocked(true);
+  problem(code, detail);
+}
+
+/** Show a plain-English explanation of why listening failed. */
+function problem(code, detail) {
+  var box = $('problem');
+  if (!code) { box.style.display = 'none'; return; }
+  var head = 'The Speak button cannot listen', fix;
+  var keyboard = ' Tap <b style="display:inline">Use the keyboard</b>, then the microphone key on the keyboard.';
+  if (everStarted && code !== 'audio-capture' && code !== 'network') {
+    head = 'Listening stopped';
+    fix = 'Tap the Speak button to carry on, or tap <b style="display:inline">Use the keyboard</b>.';
+  } else if (code === 'service-not-allowed' || code === 'not-allowed' || code === 'start-failed') {
+    fix = 'The phone would not let this page use the microphone by itself.' + keyboard +
+      (IN_GOOGLE ? '' : ' If the phone asked and you tapped Don\'t Allow, reload the page and tap Allow.');
+  } else if (code === 'audio-capture') {
+    fix = 'No microphone was found. Close other apps using the microphone and try again.';
+  } else if (code === 'network') {
+    fix = 'Speech needs a data connection and could not reach it. Check your signal.';
+  } else {
+    fix = 'Listening stopped unexpectedly.' + keyboard;
+  }
+  box.innerHTML = '<b>' + head + '</b>' + fix +
+    '<small>Code to tell Claude: ' + esc(code) + (detail ? ' (' + esc(detail) + ')' : '') + '</small>';
+  box.style.display = 'block';
+  status('');
+}
+
+function paint() {
+  var again = document.body.classList.contains('nomic');
+  $('mic').classList.toggle('on', listening);
+  $('mic').textContent = listening ? 'Listening… tap to stop'
+    : (again ? '🎙️ Try the Speak button again' : '🎙️ Speak a line number');
+}
+
+$('mic').onclick = function () {
+  if (listening) { stopListening(); status('Stopped.'); return; }
+  listening = true; quickEnds = 0;
+  $('typed').blur();
+  clearBox(); problem('');
+  paint();
+  status('Starting the microphone…');
+  startRec();                // straight from the tap, as the phone requires
+  unlockSpeech(); keepAwake();
+};
+
+/* ---------- The page outside Google: the list is kept on this phone ---------- */
+function savedList() {
+  try { var v = JSON.parse(localStorage.getItem('wf_rows')); return v && v.rows && v.rows.length ? v : null; } catch (e) { return null; }
+}
+/** Use this list from now on and keep it on the phone. */
+function keepList(data, how) {
+  var kept = true;
+  try { localStorage.setItem('wf_rows', JSON.stringify({ at: Date.now(), rows: data })); } catch (e) { kept = false; }
+  setRows(data);
+  listInfo();
+  status(data.length + ' lines ' + how + '.' + (kept ? '' : ' This phone would not keep them, so they last until the page is closed.'));
+}
+function listInfo() {
+  var v = savedList(), box = $('listbox');
+  box.hidden = false;
+  if (!v) { $('listinfo').textContent = rows.length ? rows.length + ' lines in use, not kept on this phone.' : 'No list on this phone.'; return; }
+  var d = new Date(v.at);
+  $('listinfo').textContent = v.rows.length + ' lines kept on this phone, last updated ' +
+    d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ' at ' +
+    d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + '. ' +
+    'To update it, open your Google Wine finder page and tap Open the speaking page.';
+}
+function noList(why) {
+  rows = []; byLine = {};
+  document.body.classList.add('nolist');
+  $('result').innerHTML = '<div class="line" id="hint"></div>';
+  $('history').innerHTML = ''; lastShown = '';
+  hint((why ? '<b style="color:#ff8a80">' + esc(why) + '</b><br>' : '') +
+    '<b style="color:var(--ink)">No list on this phone yet.</b><br>' +
+    'Open your Wine finder page on Google and tap <b>Open the speaking page</b>. ' +
+    'That brings your list here and keeps it on this phone.');
+  status('');
+  listInfo();
+  $('listbox').open = true;
+}
+
+/** Rows copied from the sheet and pasted in: tabs between cells, one row per line. */
+function parsePasted(text) {
+  var grid = String(text).split(/\r?\n/).filter(function (l) { return l.replace(/\s/g, ''); })
+    .map(function (l) { return l.indexOf('\t') > -1 ? l.split('\t') : l.split(','); });
+  if (!grid.length) return [];
+  var head = grid[0].map(function (h) { return String(h).toLowerCase().replace(/[^a-z]/g, ''); });
+  var col = function (names) {
+    for (var i = 0; i < names.length; i++) { var c = head.indexOf(names[i]); if (c > -1) return c; }
+    return -1;
+  };
+  var c = { wine: col(['wine', 'type']), bay: col(['bay', 'block']), shelf: col(['shelf']),
+    seq: col(['seq', 'position', 'pos']), fac: col(['fac', 'facings']),
+    line: col(['lineno', 'line', 'linenumber']), desc: col(['description', 'desc', 'product']) };
+  var first = 1;
+  // No heading row: take columns A to G in the sheet's usual order.
+  if (c.line < 0) { c = { wine: 0, bay: 1, shelf: 2, seq: 3, fac: 4, line: 5, desc: 6 }; first = 0; }
+  var out = [];
+  for (var r = first; r < grid.length; r++) {
+    var v = grid[r], line = String(v[c.line] || '').replace(/\D/g, '');
+    if (!line) continue;
+    out.push({ line: line, wine: txt(v[c.wine]), bay: txt(v[c.bay]), shelf: txt(v[c.shelf]),
+      seq: txt(v[c.seq]), fac: txt(v[c.fac]), desc: txt(v[c.desc]) });
+  }
+  return out;
+}
+
+$('savelist').onclick = function () {
+  var data = parsePasted($('paste').value);
+  if (!data.length) { $('listinfo').textContent = 'No line numbers found in that. Copy columns A to G, including the heading row, and paste again.'; return; }
+  $('paste').value = '';
+  keepList(data, 'saved');
+  $('listbox').open = false;
+};
+$('droplist').onclick = function () {
+  if (listening) stopListening();
+  try { localStorage.removeItem('wf_rows'); } catch (e) {}
+  noList('The list has been removed from this phone.');
+};
+
+/** Outside Google: take a list handed over in the link, or the one kept on the phone. */
+function bootOutside() {
+  var packed = location.hash.slice(1);
+  var useSaved = function (why) { var v = savedList(); if (v) { setRows(v.rows); listInfo(); } else noList(why); };
+  if (!/^[zj]\./.test(packed)) { useSaved(); return; }
+  // Take the list out of the address bar straight away, so it is not left in a bookmark.
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+  var bad = 'That link did not carry a list this page could read.';
+  try {
+    unpackRows(packed).then(function (data) {
+      if (data.length) keepList(data, 'brought over from your sheet'); else useSaved(bad);
+    }, function () { useSaved(bad); });
+  } catch (e) { useSaved(bad); }
+}
+
+if (IN_GOOGLE) {
+  google.script.url.getLocation(function (loc) {
+    google.script.run.withSuccessHandler(setRows)
+      .withFailureHandler(function (err) {
+        $('mic').textContent = 'Not loaded'; $('typed').placeholder = 'Not loaded';
+        $('hint').textContent = 'Could not load the sheet: ' + err.message;
+      })
+      .getRows((loc.parameter && loc.parameter.key) || '');
+  });
+} else if (window.__TEST_ROWS__) {
+  setRows(window.__TEST_ROWS__);
+} else {
+  bootOutside();
+  window.addEventListener('hashchange', bootOutside);
+}
+</script>
+</body>
+</html>
