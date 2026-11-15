@@ -28,7 +28,11 @@
   body.handover.nomic #start { padding:14px 12px; font-size:18px; background:#3a424a; }
   body.typing #handover { padding:9px 12px; font-size:16px; background:#3a424a; }
   /* No list on this phone yet: only the instructions and the list box show. */
-  body.nolist .row, body.nolist #mic, body.nolist #start, body.nolist label { display:none; }
+  body.nolist .row, body.nolist #mic, body.nolist #start, body.nolist > label { display:none; }
+  #diag { margin-top:14px; color:var(--dim); font-size:15px; }
+  #diag summary { padding:8px 0; }
+  #log { margin:8px 0 0; padding:10px; border-radius:10px; background:var(--card); color:var(--ink);
+         font:12px/1.35 ui-monospace, Menlo, monospace; white-space:pre-wrap; min-height:40px; }
   #listbox { margin-top:22px; color:var(--dim); font-size:16px; line-height:1.4; }
   #listbox[hidden] { display:none; }
   #listbox summary { padding:8px 0; font-weight:600; }
@@ -94,6 +98,11 @@
   <textarea id="paste" placeholder="To add or replace the list by hand: copy the rows from your sheet (columns A to G, with the heading row) and paste them here."></textarea>
   <button type="button" id="savelist">Save pasted list</button>
   <button type="button" id="droplist">Remove the list from this phone</button>
+</details>
+<details id="diag">
+  <summary>Details for Claude (version 3)</summary>
+  <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
+  <pre id="log"></pre>
 </details>
 
 <script>
@@ -198,6 +207,14 @@ function unpackRows(packed) {
 }
 function txt(v) { return v === undefined || v === null ? '' : String(v).trim(); }
 function status(t) { $('status').textContent = t; }
+/** A running note of what the phone's listening and speaking did, with seconds since
+ *  the page opened. It shows under "Details for Claude" and never holds line numbers. */
+var logLines = [], t0 = Date.now();
+function log(msg) {
+  logLines.push(((Date.now() - t0) / 1000).toFixed(1) + '  ' + msg);
+  if (logLines.length > 70) logLines.shift();
+  $('log').textContent = logLines.join('\n');
+}
 /** The instructions shown in the answer card until the first answer replaces them. */
 function hint(html) { var h = $('hint'); if (h) h.innerHTML = html; }
 
@@ -313,19 +330,25 @@ var sayId = 0;
 function say(text) {
   if (!$('speak').checked || !window.speechSynthesis) return;
   speaking = true;
-  dropRec();                                   // don't listen to ourselves
+  if (closeMic) dropRec();                     // optional: shut the microphone while we speak
   var u = new SpeechSynthesisUtterance(text), mine = ++sayId;
   u.rate = 1.05;
-  function done() {
+  function done(how) {
     if (mine !== sayId) return;                // a newer answer has taken over
     sayId++; clearTimeout(giveUp);
-    speaking = false; lastShownAt = Date.now();
-    if (listening) startRec();
+    speaking = false; lastShownAt = spokeAt = Date.now();
+    quietUntil = spokeAt + 600;                // the last of our own voice may still be arriving
+    log('speak end (' + how + ')');
+    if (listening && !rec) kickTimer = setTimeout(startRec, closeMic ? 700 : 100);
   }
-  u.onend = u.onerror = done;
+  u.onend = function () { done('finished'); };
+  u.onerror = function (e) { done('error' + (e && e.error ? ' ' + e.error : '')); };
   // If the phone never tells us the speaking has finished, carry on anyway.
-  var giveUp = setTimeout(done, 2500 + text.length * 110);
-  speechSynthesis.cancel();
+  var giveUp = setTimeout(function () { done('timed out'); }, 2500 + text.length * 110);
+  window.__speaking = u;                       // keep hold of it, or an iPhone can drop it mid-sentence
+  spoken = toDigits(text, true);
+  log('speak start');
+  if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
   speechSynthesis.speak(u);
 }
 
@@ -381,8 +404,10 @@ function evaluate() {
   if (digits.length >= MIN_LEN) {
     missTimer = setTimeout(function () {
       if (toDigits(boxText(), strict) !== digits) return;
+      // Digits from our own spoken sentence, overheard a moment later, are not a question.
+      var ownVoice = !strict && Date.now() - spokeAt < 5000 && spoken.indexOf(digits) > -1;
       wipe();
-      showMiss(digits.slice(-8));
+      if (ownVoice) log('ignored our own voice'); else showMiss(digits.slice(-8));
     }, 1300);
   }
 }
@@ -393,8 +418,8 @@ function wipe() {
   if (t.value) ghost = t.value;
   t.value = ''; seenValue = '';
   clearTimeout(evalTimer); clearTimeout(missTimer); clearTimeout(idleTimer);
-  // Words from the Speak button: start a fresh listen so they are not heard twice.
-  if (voiceText) { voiceText = false; ghost = ''; dropRec(); }
+  // Digits from the Speak button: mark everything heard so far as dealt with.
+  if (voiceText) { voiceText = false; ghost = ''; used = heard; }
 }
 function clearBox() { wipe(); ghost = ''; }
 
@@ -446,64 +471,93 @@ document.addEventListener('touchend', unlockSpeech, true);
 document.addEventListener('click', unlockSpeech, true);
 
 /* ---------- The Speak button: the page listens by itself (Web Speech API) ---------- */
-// One tap starts it. What is heard is dropped into the number box, so it is answered
-// and cleared exactly like typed or keyboard-dictated numbers. After each answer the
-// page starts a fresh listen, so you can read out number after number.
+// One tap starts one long listen. The digits it hears are dropped into the number box,
+// so they are answered and cleared exactly like typed or keyboard-dictated numbers.
+// The listen is left running between numbers (an iPhone does not reliably let a page
+// start a new one without another tap), and the page keeps count of how much of what
+// has been heard is already dealt with.
 var deaf = true;            // ignore anything the current listen reports (it is being reset)
 var everStarted = false;    // listening has worked at least once since the page opened
-var startedAt = 0, quickEnds = 0, startTimer = null, kickTimer = null;
+var startedAt = 0, quickEnds = 0, startTimer = null, kickTimer = null, recCount = 0;
+var heard = '';             // every digit heard in the current listen, old and new
+var used = '';              // the front part of that which is already dealt with
+var quietUntil = 0;         // just after speaking: the last of our own voice may still arrive
+var spoken = '', spokeAt = 0;   // the digits in the last thing we said, and when we finished saying it
+var closeMic = store('closemic') === '1';   // the switch under "Details for Claude"
 
 function startRec() {
   clearTimeout(kickTimer);
   if (!SR || !listening || speaking) return;
   if (rec) { dropRec(); return; }              // one at a time; we are called back when it ends
-  var r;
+  var r, n = ++recCount, started = false, noted = '';
   try { r = new SR(); } catch (e) { fail('start-failed', e.message); return; }
   r.lang = 'en-GB';
   r.continuous = true;
   r.interimResults = true;
   r.maxAlternatives = 3;
   r.onstart = function () {
+    started = true; log('listen ' + n + ' started');
     if (rec !== r) return;
     everStarted = true; problem('');
     clearTimeout(startTimer);
     status('Listening. Read out a line number.');
   };
+  ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch'].forEach(function (name) {
+    r['on' + name] = function () { log('listen ' + n + ' ' + name); };
+  });
   r.onresult = function (ev) {
-    if (rec !== r || deaf || speaking || !listening) return;
+    if (rec !== r || deaf || !listening) return;
     quickEnds = 0;
     if (store('mic') === 'blocked') setBlocked(false);   // it works here after all
-    var text = '', last = ev.results[ev.results.length - 1];
+    var text = '', last = ev.results[ev.results.length - 1], final = !!(last && last.isFinal);
     for (var i = 0; i < ev.results.length; i++) text += pick(ev.results[i]) + ' ';
-    text = text.trim();
-    if (!text) return;
-    voiceText = true;
-    $('typed').value = text;
-    boxChanged();
-    status('Heard: "' + text + '"');
+    heard = toDigits(text);
+    var note = ev.results.length + ' phrase' + (ev.results.length === 1 ? '' : 's') + ', ' + heard.length + ' digits' +
+      (final ? ', finished' : '') + (speaking ? ', while speaking' : '');
+    if (note !== noted) { noted = note; log('heard ' + note); }
+    // Our own spoken answer is heard too. None of that is for answering.
+    if (speaking) { used = heard; return; }
+    // The phone rewrote something it heard earlier: start clean from here.
+    if (heard.indexOf(used) !== 0) { log('earlier words changed'); used = heard; return; }
+    var fresh = heard.slice(used.length);
+    if (!fresh) return;
+    // Just after we stop speaking, the end of our own sentence can still turn up.
+    if (Date.now() < quietUntil && spoken.slice(-fresh.length) === fresh) { used = heard; return; }
+    if (!voiceText || $('typed').value !== fresh) {
+      voiceText = true;
+      $('typed').value = fresh;
+      boxChanged();
+      status('Heard: ' + fresh);
+    }
     // A finished phrase with a real line number in it is answered straight away.
-    if (last && last.isFinal && findLast(toDigits(text))) { clearTimeout(evalTimer); evaluate(); }
+    if (final && findLast(fresh)) { clearTimeout(evalTimer); evaluate(); }
   };
   r.onerror = function (ev) {
+    log('listen ' + n + ' error ' + ev.error + (ev.message ? ' (' + ev.message + ')' : ''));
     if (rec !== r) return;
     if (ev.error === 'no-speech' || ev.error === 'aborted') return;   // normal pauses
     fail(ev.error, ev.message);
   };
   r.onend = function () {
+    log('listen ' + n + ' ended');
     if (rec !== r) return;
-    rec = null;
+    rec = null; heard = used = '';
     if (!listening || speaking) return;
     // It stopped by itself (a long pause) or we asked it to start afresh: go again.
     quickEnds = (Date.now() - startedAt < 1000) ? quickEnds + 1 : 0;
     if (quickEnds >= 5) { fail('keeps-stopping'); return; }
     kickTimer = setTimeout(startRec, 250);
   };
-  rec = r; deaf = false; startedAt = Date.now();
-  try { r.start(); } catch (e) { rec = null; fail('start-failed', e.message); return; }
+  rec = r; deaf = false; heard = used = ''; quietUntil = 0; startedAt = Date.now();
+  log('listen ' + n + ' asked for');
+  try { r.start(); } catch (e) { rec = null; log('start failed: ' + e.message); fail('start-failed', e.message); return; }
   clearTimeout(startTimer);
   startTimer = setTimeout(function () {
-    if (listening && rec === r && !everStarted) status('Waiting for the microphone. If the phone asks, tap Allow.');
-  }, 5000);
+    if (!listening || rec !== r || started) return;
+    log('listen ' + n + ' has not started after 4s');
+    if (!everStarted) status('Waiting for the microphone. If the phone asks, tap Allow.');
+    else fail('no-restart');                   // be honest: the phone has not carried on listening
+  }, 4000);
 }
 
 /** The best wording of one heard phrase: one with a real line number in it, if any. */
@@ -529,7 +583,7 @@ function dropRec() {
 }
 
 function stopListening() {
-  listening = false;
+  listening = false; log('stopped');
   clearTimeout(startTimer); clearTimeout(kickTimer);
   dropRec();
   if (voiceText) clearBox();
@@ -584,6 +638,7 @@ function paint() {
 
 $('mic').onclick = function () {
   if (listening) { stopListening(); status('Stopped.'); return; }
+  log('tap Speak');
   listening = true; quickEnds = 0;
   $('typed').blur();
   clearBox(); problem('');
@@ -592,6 +647,14 @@ $('mic').onclick = function () {
   startRec();                // straight from the tap, as the phone requires
   unlockSpeech(); keepAwake();
 };
+
+$('closemic').checked = closeMic;
+$('closemic').onchange = function () {
+  closeMic = this.checked; store('closemic', closeMic ? '1' : '0');
+  log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
+};
+log('version 3, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') : 'not iPhone') +
+  (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser'));
 
 /* ---------- The page outside Google: the list is kept on this phone ---------- */
 function savedList() {
