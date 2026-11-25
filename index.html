@@ -100,7 +100,7 @@
   <button type="button" id="droplist">Remove the list from this phone</button>
 </details>
 <details id="diag">
-  <summary>Details for Claude (version 3)</summary>
+  <summary>Details for Claude (version 4)</summary>
   <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
   <pre id="log"></pre>
 </details>
@@ -117,6 +117,9 @@ var IOS = /iPhone|iPad|iPod/.test(UA) || (navigator.platform === 'MacIntel' && n
 var IN_GOOGLE = !!(window.google && google.script && google.script.run);
 // Where the copy outside Google lives. The Google page hands the list over to it.
 var SPEAK_PAGE = 'https://tomtubbs.github.io/product-finder/';
+// On an iPhone only the Safari app lets a page listen. Chrome, the Google app and
+// pages opened inside chat or email apps are refused by the phone.
+var OTHER_BROWSER = IOS && /CriOS|FxiOS|EdgiOS|OPiOS|GSA\/|FBAN|FBAV|Instagram|LinkedInApp|Line\//.test(UA);
 // Phones only bring up the keyboard when you touch the screen, so there a
 // button does the job instead of the page trying by itself.
 var TOUCH = IOS || !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
@@ -613,6 +616,17 @@ function problem(code, detail) {
   if (everStarted && code !== 'audio-capture' && code !== 'network') {
     head = 'Listening stopped';
     fix = 'Tap the Speak button to carry on, or tap <b style="display:inline">Use the keyboard</b>.';
+  } else if (code === 'service-not-allowed' && IOS && !IN_GOOGLE) {
+    // The iPhone's own speech service said no, before the microphone was even tried.
+    head = 'The iPhone would not let the page listen';
+    fix = OTHER_BROWSER
+      ? 'This page is open in an app other than Safari. On an iPhone only the Safari app lets a page listen. ' +
+        'Copy the link, open it in Safari and try again. Until then:' + keyboard
+      : 'Check these on this iPhone, then reload the page and try the Speak button again.<br>' +
+        '1. The page is open in the Safari app, not Chrome or another app.<br>' +
+        '2. In Settings, General, Keyboard: Enable Dictation is on.<br>' +
+        '3. In Settings, Privacy &amp; Security, Speech Recognition: Safari is on.<br>' +
+        'Until then:' + keyboard;
   } else if (code === 'service-not-allowed' || code === 'not-allowed' || code === 'start-failed') {
     fix = 'The phone would not let this page use the microphone by itself.' + keyboard +
       (IN_GOOGLE ? '' : ' If the phone asked and you tapped Don\'t Allow, reload the page and tap Allow.');
@@ -653,7 +667,8 @@ $('closemic').onchange = function () {
   closeMic = this.checked; store('closemic', closeMic ? '1' : '0');
   log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
 };
-log('version 3, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') : 'not iPhone') +
+log('version 4, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') +
+  (OTHER_BROWSER ? ', not Safari' : ', Safari') : 'not iPhone') +
   (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser'));
 
 /* ---------- The page outside Google: the list is kept on this phone ---------- */
