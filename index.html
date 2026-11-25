@@ -100,7 +100,7 @@
   <button type="button" id="droplist">Remove the list from this phone</button>
 </details>
 <details id="diag">
-  <summary>Details for Claude (version 4)</summary>
+  <summary>Details for Claude (version 6)</summary>
   <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
   <pre id="log"></pre>
 </details>
@@ -333,8 +333,7 @@ var sayId = 0;
 function say(text) {
   if (!$('speak').checked || !window.speechSynthesis) return;
   speaking = true;
-  if (closeMic) dropRec();                     // optional: shut the microphone while we speak
-  var u = new SpeechSynthesisUtterance(text), mine = ++sayId;
+  var u = new SpeechSynthesisUtterance(text), mine = ++sayId, giveUp = null, begun = false;
   u.rate = 1.05;
   function done(how) {
     if (mine !== sayId) return;                // a newer answer has taken over
@@ -342,17 +341,34 @@ function say(text) {
     speaking = false; lastShownAt = spokeAt = Date.now();
     quietUntil = spokeAt + 600;                // the last of our own voice may still be arriving
     log('speak end (' + how + ')');
-    if (listening && !rec) kickTimer = setTimeout(startRec, closeMic ? 700 : 100);
+    if (!listening || rec) return;
+    // The microphone was closed for the answer: open it again. The first try can come too
+    // soon for an iPhone, so a listen that hears nothing is swapped for a new one, twice at most.
+    if (closeMic) { probation = 2; status('Getting the microphone back…'); }
+    kickTimer = setTimeout(function () { startRec('after speaking'); }, closeMic ? 400 : 100);
   }
   u.onend = function () { done('finished'); };
   u.onerror = function (e) { done('error' + (e && e.error ? ' ' + e.error : '')); };
-  // If the phone never tells us the speaking has finished, carry on anyway.
-  var giveUp = setTimeout(function () { done('timed out'); }, 2500 + text.length * 110);
-  window.__speaking = u;                       // keep hold of it, or an iPhone can drop it mid-sentence
+  function begin() {
+    if (begun || mine !== sayId) return;
+    begun = true;
+    // If the phone never tells us the speaking has finished, carry on anyway.
+    giveUp = setTimeout(function () { done('timed out'); }, 2500 + text.length * 110);
+    window.__speaking = u;                     // keep hold of it, or an iPhone can drop it mid-sentence
+    log('speak start');
+    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  }
   spoken = toDigits(text, true);
-  log('speak start');
-  if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
-  speechSynthesis.speak(u);
+  if (closeMic && listening && rec) {
+    // An iPhone takes the microphone away from an open listen the moment it speaks, and
+    // never gives it back to that listen. So close the listen properly first, speak once
+    // it has gone, and open a new listen afterwards.
+    status('Speaking the answer…');
+    afterEnd = begin;
+    dropRec();
+    setTimeout(begin, 500);
+  } else begin();
 }
 
 /* ---------- The box: typed numbers, or numbers dictated with the keyboard mic ---------- */
@@ -486,13 +502,17 @@ var heard = '';             // every digit heard in the current listen, old and 
 var used = '';              // the front part of that which is already dealt with
 var quietUntil = 0;         // just after speaking: the last of our own voice may still arrive
 var spoken = '', spokeAt = 0;   // the digits in the last thing we said, and when we finished saying it
-var closeMic = store('closemic') === '1';   // the switch under "Details for Claude"
+// Close the microphone while the answer is spoken. iPhones need this, so it starts ticked there.
+var closeMic = store('closemic2') ? store('closemic2') === '1' : IOS;
+var afterEnd = null;        // what to do as soon as the listen being closed has really gone
+var probation = 0;          // a listen opened after speaking may be swapped this many times if it hears nothing
+var recycleTimer = null;
 
-function startRec() {
-  clearTimeout(kickTimer);
-  if (!SR || !listening || speaking) return;
+function startRec(why) {
+  clearTimeout(kickTimer); clearTimeout(recycleTimer);
+  if (!SR || !listening || (speaking && closeMic)) return;
   if (rec) { dropRec(); return; }              // one at a time; we are called back when it ends
-  var r, n = ++recCount, started = false, noted = '';
+  var r, n = ++recCount, started = false, noted = '', alive = false;
   try { r = new SR(); } catch (e) { fail('start-failed', e.message); return; }
   r.lang = 'en-GB';
   r.continuous = true;
@@ -506,11 +526,12 @@ function startRec() {
     status('Listening. Read out a line number.');
   };
   ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch'].forEach(function (name) {
-    r['on' + name] = function () { log('listen ' + n + ' ' + name); };
+    r['on' + name] = function () { if (name === 'speechstart') alive = true; log('listen ' + n + ' ' + name); };
   });
   r.onresult = function (ev) {
+    alive = true;
     if (rec !== r || deaf || !listening) return;
-    quickEnds = 0;
+    quickEnds = 0; probation = 0;
     if (store('mic') === 'blocked') setBlocked(false);   // it works here after all
     var text = '', last = ev.results[ev.results.length - 1], final = !!(last && last.isFinal);
     for (var i = 0; i < ev.results.length; i++) text += pick(ev.results[i]) + ' ';
@@ -520,9 +541,16 @@ function startRec() {
     if (note !== noted) { noted = note; log('heard ' + note); }
     // Our own spoken answer is heard too. None of that is for answering.
     if (speaking) { used = heard; return; }
-    // The phone rewrote something it heard earlier: start clean from here.
-    if (heard.indexOf(used) !== 0) { log('earlier words changed'); used = heard; return; }
-    var fresh = heard.slice(used.length);
+    var fresh;
+    if (heard.indexOf(used) === 0) {
+      fresh = heard.slice(used.length);        // the text so far, plus something new on the end
+    } else if (heard.length >= 4 && used.slice(-heard.length) === heard) {
+      used = heard; return;                    // the phone only dropped older words: nothing new
+    } else {
+      // Newer iPhones begin their text again after every pause, so this is all new.
+      if (used) log('text began afresh');
+      used = ''; fresh = heard;
+    }
     if (!fresh) return;
     // Just after we stop speaking, the end of our own sentence can still turn up.
     if (Date.now() < quietUntil && spoken.slice(-fresh.length) === fresh) { used = heard; return; }
@@ -545,22 +573,35 @@ function startRec() {
     log('listen ' + n + ' ended');
     if (rec !== r) return;
     rec = null; heard = used = '';
-    if (!listening || speaking) return;
-    // It stopped by itself (a long pause) or we asked it to start afresh: go again.
+    if (afterEnd) { var next = afterEnd; afterEnd = null; next(); }
+    if (!listening || (speaking && closeMic)) return;
+    // The phone stopped it by itself (often after a pause): go again, and do it right
+    // here inside the phone's own "ended" signal, where an iPhone is most likely to allow it.
     quickEnds = (Date.now() - startedAt < 1000) ? quickEnds + 1 : 0;
     if (quickEnds >= 5) { fail('keeps-stopping'); return; }
-    kickTimer = setTimeout(startRec, 250);
+    startRec(probation ? 'trying again' : 'again');
   };
   rec = r; deaf = false; heard = used = ''; quietUntil = 0; startedAt = Date.now();
-  log('listen ' + n + ' asked for');
+  log('listen ' + n + ' asked for' + (why ? ' (' + why + ')' : ''));
   try { r.start(); } catch (e) { rec = null; log('start failed: ' + e.message); fail('start-failed', e.message); return; }
   clearTimeout(startTimer);
   startTimer = setTimeout(function () {
     if (!listening || rec !== r || started) return;
     log('listen ' + n + ' has not started after 4s');
     if (!everStarted) status('Waiting for the microphone. If the phone asks, tap Allow.');
+    else if (probation > 0) { probation--; dropRec(); }   // asked too soon after speaking: ask again
     else fail('no-restart');                   // be honest: the phone has not carried on listening
   }, 4000);
+  if (probation > 0) {
+    // Opened straight after speaking. If it has heard nothing at all after a few seconds it
+    // may have been opened too soon to get the microphone, so swap it for a new one.
+    recycleTimer = setTimeout(function () {
+      if (!listening || rec !== r || speaking || alive || !started || probation < 1) return;
+      probation--;
+      log('listen ' + n + ' has heard nothing: opening a new one');
+      dropRec();
+    }, probation > 1 ? 4500 : 6000);
+  }
 }
 
 /** The best wording of one heard phrase: one with a real line number in it, if any. */
@@ -587,7 +628,8 @@ function dropRec() {
 
 function stopListening() {
   listening = false; log('stopped');
-  clearTimeout(startTimer); clearTimeout(kickTimer);
+  probation = 0;
+  clearTimeout(startTimer); clearTimeout(kickTimer); clearTimeout(recycleTimer);
   dropRec();
   if (voiceText) clearBox();
   if (wake) { try { wake.release(); } catch (e) {} wake = null; }
@@ -615,7 +657,8 @@ function problem(code, detail) {
   var keyboard = ' Tap <b style="display:inline">Use the keyboard</b>, then the microphone key on the keyboard.';
   if (everStarted && code !== 'audio-capture' && code !== 'network') {
     head = 'Listening stopped';
-    fix = 'Tap the Speak button to carry on, or tap <b style="display:inline">Use the keyboard</b>.';
+    fix = (code === 'no-restart' ? 'The phone did not open the microphone again by itself. ' : '') +
+      'Tap the Speak button to carry on, or tap <b style="display:inline">Use the keyboard</b>.';
   } else if (code === 'service-not-allowed' && IOS && !IN_GOOGLE) {
     // The iPhone's own speech service said no, before the microphone was even tried.
     head = 'The iPhone would not let the page listen';
@@ -653,23 +696,24 @@ function paint() {
 $('mic').onclick = function () {
   if (listening) { stopListening(); status('Stopped.'); return; }
   log('tap Speak');
-  listening = true; quickEnds = 0;
+  listening = true; quickEnds = 0; probation = 0;
   $('typed').blur();
   clearBox(); problem('');
   paint();
   status('Starting the microphone…');
-  startRec();                // straight from the tap, as the phone requires
+  startRec('tap');           // straight from the tap, as the phone requires
   unlockSpeech(); keepAwake();
 };
 
 $('closemic').checked = closeMic;
 $('closemic').onchange = function () {
-  closeMic = this.checked; store('closemic', closeMic ? '1' : '0');
+  closeMic = this.checked; store('closemic2', closeMic ? '1' : '0');
   log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
 };
-log('version 4, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') +
+log('version 6, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') +
   (OTHER_BROWSER ? ', not Safari' : ', Safari') : 'not iPhone') +
-  (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser'));
+  (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser') +
+  (closeMic ? ', microphone closes to speak' : ', microphone stays open to speak'));
 
 /* ---------- The page outside Google: the list is kept on this phone ---------- */
 function savedList() {
