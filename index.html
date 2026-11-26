@@ -116,7 +116,7 @@
   <button type="button" id="droplist">Remove the list from this phone</button>
 </details>
 <details id="diag">
-  <summary>Details for Claude (version 10)</summary>
+  <summary>Details for Claude (version 11)</summary>
   <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
   <label id="cliprow" hidden><input type="checkbox" id="clips"> <span>Use the recorded voice<small>Not yet tried on a real phone</small></span></label>
   <pre id="log"></pre>
@@ -990,7 +990,7 @@ $('closemic').onchange = function () {
   log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
 };
 // An iPhone no longer tells a page its real iOS version, so only Safari's version is shown.
-log('version 10, ' + (IOS ? 'iPhone' + (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
+log('version 11, ' + (IOS ? 'iPhone' + (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
   (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser') +
   (useClips ? ', recorded voice' : ', phone voice') + (closeMic ? ', microphone closes to speak' : ''));
 
@@ -1018,7 +1018,7 @@ function listInfo() {
     ' kept on this phone, last updated ' +
     d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ' at ' +
     d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + '. ' +
-    'To update it, open your Google Wine finder page and tap Open the speaking page.';
+    'To update it, open the Wine finder link for your Google Sheet (it starts with script.google.com) and tap Open the speaking page there.';
 }
 function noList(why) {
   rows = []; byLine = {}; setLocs([]);
@@ -1027,8 +1027,9 @@ function noList(why) {
   $('history').innerHTML = ''; lastShown = '';
   hint((why ? '<b style="color:#ff8a80">' + esc(why) + '</b><br>' : '') +
     '<b style="color:var(--ink)">No list on this phone yet.</b><br>' +
-    'Open your Wine finder page on Google and tap <b>Open the speaking page</b>. ' +
-    'That brings your list here and keeps it on this phone.');
+    'This page cannot read your Google Sheet by itself. Open the Wine finder link for your sheet ' +
+    '(the web app link, which starts with script.google.com) and tap the green <b>Open the speaking page</b> button there. ' +
+    'That brings the list here and keeps a copy on this phone.');
   status('');
   listInfo();
   $('listbox').open = true;
