@@ -53,7 +53,9 @@
   .row button { font-size:17px; padding:0 14px; border-radius:12px; border:0;
         background:#3a424a; color:var(--ink); }
   label { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:16px; color:var(--dim); }
-  label input { width:22px; height:22px; }
+  label input { width:22px; height:22px; flex:none; }
+  label[hidden] { display:none; }
+  label small { display:block; font-size:13px; opacity:.8; }
   #result { margin-top:10px; background:var(--card); border-radius:14px; padding:14px; min-height:150px; }
   #result .line { color:var(--dim); font-size:16px; line-height:1.4; }
   #result .desc { font-size:21px; font-weight:700; margin:4px 0 10px; }
@@ -64,6 +66,14 @@
   .loc .bay { flex:1.6; background:#3b3413; }
   .loc .bay b { font-size:64px; }
   .extra { color:var(--dim); margin-top:8px; font-size:15px; }
+  /* A line that also has reserve stock or bulk stock somewhere else. */
+  .tag { margin-top:8px; padding:10px 12px; border-radius:12px; font-size:19px; font-weight:700; color:#fff; }
+  .tag span { font-weight:400; }
+  .tag.res { background:#1d4e6b; }
+  .tag.bulk { background:#5b3a78; }
+  #history .h-tag { display:inline-block; margin:4px 6px 0 0; padding:1px 8px; border-radius:8px; font-size:16px; color:#fff; }
+  #history .h-tag.res { background:#1d4e6b; }
+  #history .h-tag.bulk { background:#5b3a78; }
   .miss { font-size:22px; color:#ff8a80; font-weight:700; }
   #problem { display:none; margin-top:12px; padding:14px; border-radius:12px; background:#5a1f1a; color:#fff; font-size:16px; line-height:1.4; }
   #problem b { display:block; font-size:18px; margin-bottom:6px; }
@@ -95,13 +105,14 @@
 <details id="listbox" hidden>
   <summary>Your list on this phone</summary>
   <div id="listinfo"></div>
-  <textarea id="paste" placeholder="To add or replace the list by hand: copy the rows from your sheet (columns A to G, with the heading row) and paste them here."></textarea>
+  <textarea id="paste" placeholder="To add or replace the list by hand: copy the rows from your sheet (every column, with the heading row) and paste them here."></textarea>
   <button type="button" id="savelist">Save pasted list</button>
   <button type="button" id="droplist">Remove the list from this phone</button>
 </details>
 <details id="diag">
-  <summary>Details for Claude (version 7)</summary>
+  <summary>Details for Claude (version 9)</summary>
   <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
+  <label id="cliprow" hidden><input type="checkbox" id="clips"> <span>Use the recorded voice<small>Not yet tried on a real phone</small></span></label>
   <pre id="log"></pre>
 </details>
 
@@ -191,7 +202,7 @@ function pipe(bytes, stream) {
 /** The list as text that fits in a link: "z." squashed, or "j." plain. */
 function packRows(data) {
   var bytes = new TextEncoder().encode(JSON.stringify(data.map(function (r) {
-    return [r.line, r.wine, r.bay, r.shelf, r.seq, r.fac, r.desc];
+    return [r.line, r.wine, r.bay, r.shelf, r.seq, r.fac, r.desc, txt(r.res), txt(r.bulk)];
   })));
   var plain = function () { return 'j.' + b64(bytes); };
   if (!window.CompressionStream || !window.DecompressionStream) return Promise.resolve(plain());
@@ -206,7 +217,7 @@ function unpackRows(packed) {
     var list = JSON.parse(new TextDecoder().decode(b)), out = [];
     list.forEach(function (a) {
       var line = String(a[0] || '').replace(/\D/g, '');
-      if (line) out.push({ line: line, wine: txt(a[1]), bay: txt(a[2]), shelf: txt(a[3]), seq: txt(a[4]), fac: txt(a[5]), desc: txt(a[6]) });
+      if (line) out.push({ line: line, wine: txt(a[1]), bay: txt(a[2]), shelf: txt(a[3]), seq: txt(a[4]), fac: txt(a[5]), desc: txt(a[6]), res: txt(a[7]), bulk: txt(a[8]) });
     });
     return out;
   });
@@ -289,34 +300,82 @@ function match(digits) {
 
 var lastShown = '', lastShownAt = 0;
 
+/** What a Reserves or Bulk cell in the sheet says: '' for nothing, true for a plain tick
+ *  (or yes, y, x), or the words to show. A number in the Reserves column is a number of
+ *  cases, so 45 becomes "45 cases"; 0 means there are none. */
+function mark(v, cases) {
+  v = txt(v);
+  if (!v || /^(false|no|n|-|none)$/i.test(v)) return '';
+  if (/^(true|yes|y|x|tick|\u2713|\u2714|\u2611)$/i.test(v)) return true;
+  var num = v.replace(/,/g, '');
+  if (/^\d+(\.\d+)?$/.test(num)) {
+    if (!parseFloat(num)) return '';
+    return cases ? v + (parseFloat(num) === 1 ? ' case' : ' cases') : v;
+  }
+  return v;
+}
+function tagHtml(cls, name, m) {
+  return m ? '<div class="tag ' + cls + '">' + name + (m === true ? '' : '<span> - ' + esc(m) + '</span>') + '</div>' : '';
+}
+
 function showLine(line) {
   var hits = byLine[line], html = '', spoken = [];
-  hits.forEach(function (r) {
+  // The same answer as a run of recorded clips: the digits, then bay, shelf and position.
+  var clips = digitClips(line).concat([0.18]);
+  hits.forEach(function (r, i) {
+    var res = mark(r.res, true), bulk = mark(r.bulk);
     html += '<div class="line">Line ' + esc(r.line) + (r.wine ? ' · ' + esc(r.wine) : '') + '</div>' +
       '<div class="desc">' + esc(r.desc) + '</div>' +
-      '<div class="loc"><div class="bay"><small>Bay</small><b>' + esc(r.bay) + '</b></div>' +
-      '<div><small>Shelf</small><b>' + esc(r.shelf) + '</b></div>' +
-      '<div><small>Position</small><b>' + esc(r.seq) + '</b></div></div>' +
+      (r.bay || r.shelf || r.seq ? '<div class="loc">' +
+        (r.bay ? '<div class="bay"><small>Bay</small><b>' + esc(r.bay) + '</b></div>' : '') +
+        (r.shelf ? '<div><small>Shelf</small><b>' + esc(r.shelf) + '</b></div>' : '') +
+        (r.seq ? '<div><small>Position</small><b>' + esc(r.seq) + '</b></div>' : '') + '</div>' : '') +
+      tagHtml('res', 'Reserves', res) + tagHtml('bulk', 'Bulk stock', bulk) +
       (r.fac ? '<div class="extra">' + esc(r.fac) + ' facing' + (r.fac == 1 ? '' : 's') + '</div>' : '');
-    spoken.push('Bay ' + r.bay + ', shelf ' + r.shelf + ', position ' + r.seq);
+    // Lines outside the shelved layouts may have no bay, shelf or position: say what there is.
+    var where = [];
+    if (r.bay) where.push('Bay ' + r.bay);
+    if (r.shelf) where.push('shelf ' + r.shelf);
+    if (r.seq) where.push('position ' + r.seq);
+    var parts = where.length ? [where.join(', ')] : [];
+    if (res) parts.push('Reserves' + (res === true ? '' : ', ' + res));
+    if (bulk) parts.push('Bulk stock' + (bulk === true ? '' : ', ' + bulk));
+    spoken.push(parts.length ? parts.join('. ') : 'No location in the sheet');
+    if (i) clips.push('also');
+    if (r.bay) clips.push(clipFor('b', r.bay));
+    if (r.shelf) clips.push(clipFor('s', r.shelf));
+    if (r.seq) clips.push(clipFor('p', r.seq));
+    if (!parts.length) clips.push('?');        // nothing recorded for this: the phone's voice says it
+    // The recorded voice only says that there are reserves or bulk stock; the place is on screen.
+    if (res) clips.push('res');
+    if (bulk) clips.push('bulk');
   });
   $('result').innerHTML = html;
   if (line !== lastShown) {
-    var r0 = hits[0], li = document.createElement('li');
+    var r0 = hits[0], li = document.createElement('li'), res0 = mark(r0.res, true), bulk0 = mark(r0.bulk);
     li.innerHTML = '<div><b>' + esc(r0.line) + '</b>' + (r0.wine ? ' · ' + esc(r0.wine) : '') + '</div>' +
-      '<div class="h-loc"><span>Bay <b>' + esc(r0.bay) + '</b></span> <span>Shelf <b>' + esc(r0.shelf) +
-      '</b></span> <span>Position <b>' + esc(r0.seq) + '</b></span></div>' +
+      '<div class="h-loc">' + (r0.bay ? '<span>Bay <b>' + esc(r0.bay) + '</b></span> ' : '') +
+      (r0.shelf ? '<span>Shelf <b>' + esc(r0.shelf) + '</b></span> ' : '') +
+      (r0.seq ? '<span>Position <b>' + esc(r0.seq) + '</b></span>' : '') + '</div>' +
+      (res0 ? '<span class="h-tag res">Reserves' + (res0 === true ? '' : ' - ' + esc(res0)) + '</span>' : '') +
+      (bulk0 ? '<span class="h-tag bulk">Bulk stock' + (bulk0 === true ? '' : ' - ' + esc(bulk0)) + '</span>' : '') +
       '<div>' + esc(r0.desc) + '</div>';
     $('history').insertBefore(li, $('history').firstChild);
   }
   lastShown = line; lastShownAt = Date.now();
-  say(line.split('').join(' ') + '. ' + spoken.join('. Also, '));
+  say(line.split('').join(' ') + '. ' + spoken.join('. Also, '), clips);
+}
+function digitClips(digits) { return digits.split('').map(function (d) { return 'n' + d; }); }
+/** The clip for "Bay 3," and so on. Anything that is not a plain number has no clip. */
+function clipFor(kind, value) {
+  var m = /^\s*0*(\d{1,3})\s*$/.exec(value);
+  return m ? kind + m[1] : '?';
 }
 
 function showMiss(digits) {
   $('result').innerHTML = '<div class="line">Heard ' + esc(digits) + '</div><div class="miss">Not in the sheet</div>';
   lastShown = ''; 
-  say('Line ' + digits.split('').join(' ') + ' not found');
+  say('Line ' + digits.split('').join(' ') + ' not found', ['line'].concat(digitClips(digits), ['notfound']));
 }
 
 /** One whole phrase or typed entry: find it, show it. */
@@ -332,12 +391,83 @@ function lookup(text, strict) {
 function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
   return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]; }); }
 
-var sayId = 0;
-function say(text) {
-  if (!$('speak').checked || !window.speechSynthesis) return;
+/* ---------- The recorded voice ---------- */
+// On some iPhones the phone's own voice makes it let go of the microphone, and a page
+// cannot get the microphone back without another tap. Short recorded clips, played
+// through the page's own sound output, are used instead when the box is ticked, and
+// the listen is left open. Only on the page outside Google, where the sound file lives.
+var VOICE_FILE = 'voice-1.mp3', MARK_AT = 0.04;
+// Where each clip sits in the sound file: [starts at, lasts] in seconds.
+// n0-n9 digits, b1-b30 "Bay 1,", s1-s12 "shelf 1,", p1-p60 "position 1.", res "Reserves.", bulk "Bulk stock."
+var CLIPS = {"n0":[0.1,0.537],"n1":[0.837,0.409],"n2":[1.447,0.363],"n3":[2.01,0.529],"n4":[2.739,0.327],"n5":[3.266,0.43],"n6":[3.896,0.462],"n7":[4.558,0.542],"n8":[5.3,0.423],"n9":[5.923,0.53],"b1":[6.653,0.561],"b2":[7.414,0.551],"b3":[8.164,0.684],"b4":[9.049,0.549],"b5":[9.798,0.637],"b6":[10.635,0.646],"b7":[11.481,0.702],"b8":[12.383,0.629],"b9":[13.213,0.657],"b10":[14.07,0.605],"b11":[14.875,0.719],"b12":[15.793,0.725],"b13":[16.719,0.859],"b14":[17.777,0.809],"b15":[18.786,0.913],"b16":[19.899,0.893],"b17":[20.992,0.932],"b18":[22.124,0.777],"b19":[23.102,0.853],"b20":[24.155,0.7],"b21":[25.055,0.917],"b22":[26.172,0.859],"b23":[27.231,1.039],"b24":[28.47,0.913],"b25":[29.584,0.988],"b26":[30.771,0.974],"b27":[31.946,1.002],"b28":[33.147,0.905],"b29":[34.252,1.018],"b30":[35.471,0.716],"s1":[36.386,0.739],"s2":[37.325,0.77],"s3":[38.296,0.908],"s4":[39.403,0.764],"s5":[40.367,0.845],"s6":[41.413,0.837],"s7":[42.449,0.908],"s8":[43.557,0.808],"s9":[44.565,0.857],"s10":[45.622,0.816],"s11":[46.638,0.919],"s12":[47.757,0.946],"p1":[48.903,0.807],"p2":[49.91,0.772],"p3":[50.883,0.946],"p4":[52.028,0.802],"p5":[53.03,0.883],"p6":[54.112,0.883],"p7":[55.195,0.937],"p8":[56.332,0.865],"p9":[57.397,0.901],"p10":[58.499,0.836],"p11":[59.535,0.98],"p12":[60.715,0.976],"p13":[61.891,1.108],"p14":[63.199,1.057],"p15":[64.456,1.142],"p16":[65.798,1.14],"p17":[67.139,1.167],"p18":[68.506,1.015],"p19":[69.721,1.096],"p20":[71.017,0.951],"p21":[72.167,1.157],"p22":[73.525,1.107],"p23":[74.831,1.302],"p24":[76.333,1.175],"p25":[77.708,1.235],"p26":[79.143,1.227],"p27":[80.57,1.247],"p28":[82.017,1.161],"p29":[83.377,1.256],"p30":[84.834,0.96],"p31":[85.993,1.158],"p32":[87.352,1.104],"p33":[88.656,1.296],"p34":[90.152,1.169],"p35":[91.521,1.242],"p36":[92.963,1.224],"p37":[94.387,1.248],"p38":[95.834,1.161],"p39":[97.195,1.259],"p40":[98.655,0.928],"p41":[99.782,1.131],"p42":[101.113,1.081],"p43":[102.394,1.265],"p44":[103.859,1.133],"p45":[105.193,1.216],"p46":[106.608,1.203],"p47":[108.011,1.218],"p48":[109.43,1.134],"p49":[110.764,1.238],"p50":[112.202,0.949],"p51":[113.351,1.155],"p52":[114.706,1.102],"p53":[116.007,1.296],"p54":[117.504,1.167],"p55":[118.871,1.234],"p56":[120.305,1.224],"p57":[121.729,1.246],"p58":[123.175,1.159],"p59":[124.534,1.258],"p60":[125.992,1.017],"also":[127.209,0.589],"line":[127.999,0.521],"notfound":[128.72,0.856],"res":[129.776,0.675],"bulk":[130.652,0.755]};
+var AC = window.AudioContext || window.webkitAudioContext;
+var actx = null, voiceBuf = null, voiceShift = 0, voiceState = '', voiceNodes = [];
+var useClips = !IN_GOOGLE && !!AC && store('clips') === '1';
+
+/** The page's own sound output. An iPhone only switches it on from a tap. */
+function audioOn() {
+  if (!AC) return null;
+  if (!actx) { try { actx = new AC(); } catch (e) { log('no sound output: ' + e.message); return null; } }
+  if (actx.state !== 'running' && actx.resume) {
+    try { var p = actx.resume(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+  }
+  return actx;
+}
+function loadVoice() {
+  if (voiceState || !audioOn()) return;
+  voiceState = 'loading';
+  fetch(VOICE_FILE).then(function (r) {
+    if (!r.ok) throw new Error('file answered ' + r.status);
+    return r.arrayBuffer();
+  }).then(function (bytes) {
+    return new Promise(function (ok, bad) {
+      var p = actx.decodeAudioData(bytes, ok, bad);
+      if (p && p.catch) p.catch(bad);
+    });
+  }).then(function (buf) {
+    // A marker tone sits at a known moment near the start of the file. Where it turns up
+    // after unpacking shows how far this phone has shifted everything.
+    var d = buf.getChannelData(0), n = Math.min(d.length, Math.floor(buf.sampleRate * 0.4)), i = 0;
+    while (i < n && Math.abs(d[i]) < 0.25) i++;
+    voiceShift = i < n ? i / buf.sampleRate - MARK_AT : 0;
+    voiceBuf = buf; voiceState = 'ready';
+    log('recorded voice ready (' + Math.round(buf.duration) + 's, shift ' + Math.round(voiceShift * 1000) + 'ms)');
+  }).catch(function (e) {
+    voiceState = 'failed';
+    log('recorded voice failed: ' + ((e && e.message) || e || 'could not unpack the sound file'));
+  });
+}
+function stopClips() {
+  voiceNodes.forEach(function (n) { try { n.onended = null; n.stop(); } catch (e) {} });
+  voiceNodes = [];
+}
+/** Play these clips one after another. Numbers in the list are pauses, in seconds. */
+function playClips(list, done) {
+  stopClips();
+  var t = actx.currentTime + 0.06, last = null;
+  list.forEach(function (k) {
+    if (typeof k === 'number') { t += k; return; }
+    var c = CLIPS[k], n = actx.createBufferSource();
+    n.buffer = voiceBuf; n.connect(actx.destination);
+    n.start(t, Math.max(0, c[0] + voiceShift - 0.004), c[1] + 0.012);
+    t += c[1]; last = n; voiceNodes.push(n);
+  });
+  last.onended = function () { if (voiceNodes.indexOf(last) > -1) { voiceNodes = []; done(); } };
+  return t - actx.currentTime;
+}
+
+var sayId = 0, voiceNamed = false;
+function say(text, clips) {
+  if (!$('speak').checked) return;
+  var recorded = false;
+  if (useClips && clips) {
+    var why = voiceState !== 'ready' ? 'not loaded (' + (voiceState || 'not asked for') + ')'
+      : !clips.every(function (k) { return typeof k === 'number' || CLIPS[k]; }) ? 'no clip for one of the values' : '';
+    if (why) log('recorded voice not used: ' + why); else recorded = true;
+  }
+  if (!recorded && !window.speechSynthesis) return;
   speaking = true;
-  var u = new SpeechSynthesisUtterance(text), mine = ++sayId, giveUp = null, begun = false;
-  u.rate = 1.05;
+  var u = recorded ? null : new SpeechSynthesisUtterance(text), mine = ++sayId, giveUp = null, begun = false;
   function done(how) {
     if (mine !== sayId) return;                // a newer answer has taken over
     sayId++; clearTimeout(giveUp);
@@ -350,23 +480,38 @@ function say(text) {
     if (closeMic) { probation = 2; status('Getting the microphone back…'); }
     kickTimer = setTimeout(function () { startRec('after speaking'); }, closeMic ? 400 : 100);
   }
-  u.onend = function () { done('finished'); };
-  u.onerror = function (e) { done('error' + (e && e.error ? ' ' + e.error : '')); };
   function begin() {
     if (begun || mine !== sayId) return;
     begun = true;
+    stopClips();
+    if (window.speechSynthesis && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
+    if (recorded) {
+      audioOn();
+      log('speak start (recorded voice, sound output ' + actx.state + ')');
+      var secs = playClips(clips, function () { done('finished'); });
+      giveUp = setTimeout(function () { done('timed out'); }, secs * 1000 + 1500);
+      return;
+    }
     // If the phone never tells us the speaking has finished, carry on anyway.
     giveUp = setTimeout(function () { done('timed out'); }, 2500 + text.length * 110);
     window.__speaking = u;                     // keep hold of it, or an iPhone can drop it mid-sentence
+    if (!voiceNamed) {
+      voiceNamed = true;
+      try {
+        var v = speechSynthesis.getVoices().filter(function (x) { return x.default; })[0];
+        if (v) log('phone voice: ' + v.name + ', ' + v.lang);
+      } catch (e) {}
+    }
     log('speak start');
-    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
     speechSynthesis.speak(u);
   }
   spoken = toDigits(text, true);
+  if (recorded) { begin(); return; }           // the listen stays open: nothing here touches the microphone
+  u.rate = 1.05;
+  u.onend = function () { done('finished'); };
+  u.onerror = function (e) { done('error' + (e && e.error ? ' ' + e.error : '')); };
   if (closeMic && listening && rec) {
-    // An iPhone takes the microphone away from an open listen the moment it speaks, and
-    // never gives it back to that listen. So close the listen properly first, speak once
-    // it has gone, and open a new listen afterwards.
+    // Close the listen properly first, speak once it has gone, and open a new one afterwards.
     status('Speaking the answer…');
     afterEnd = begin;
     dropRec();
@@ -476,7 +621,20 @@ $('kb').onclick = function () {
 setKeyboard(store('kb') === 'numeric' ? 'numeric' : 'text', false);
 
 if (store('speak') === '0') $('speak').checked = false;
-$('speak').onchange = function () { store('speak', this.checked ? '1' : '0'); if (!this.checked && window.speechSynthesis) speechSynthesis.cancel(); };
+$('speak').onchange = function () {
+  store('speak', this.checked ? '1' : '0');
+  if (!this.checked) { stopClips(); if (window.speechSynthesis) speechSynthesis.cancel(); }
+};
+if (!IN_GOOGLE && AC) {
+  $('cliprow').hidden = false;
+  $('clips').checked = useClips;
+  $('clips').onchange = function () {
+    useClips = this.checked; store('clips', useClips ? '1' : '0');
+    log('recorded voice: ' + (useClips ? 'on' : 'off'));
+    if (useClips) { audioOn(); loadVoice(); } else stopClips();
+  };
+  if (useClips) loadVoice();                   // fetch it now so the first answer does not wait
+}
 
 function keepAwake() {
   if (wake || !navigator.wakeLock) return;
@@ -485,6 +643,7 @@ function keepAwake() {
 // iPhone only lets a page speak after a tap, so use the first tap to unlock it.
 var unlocked = false;
 function unlockSpeech() {
+  if (useClips) audioOn();                     // the page's own sound output needs a tap too
   if (unlocked || !window.speechSynthesis) return;
   unlocked = true;
   try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (e) {}
@@ -505,12 +664,10 @@ var heard = '';             // every digit heard in the current listen, old and 
 var used = '';              // the front part of that which is already dealt with
 var quietUntil = 0;         // just after speaking: the last of our own voice may still arrive
 var spoken = '', spokeAt = 0;   // the digits in the last thing we said, and when we finished saying it
-// Close the microphone while the answer is spoken. iPhones on iOS 18 or older lose the
-// microphone when they speak, so it starts ticked there. Newer ones listen and speak at
-// once, and for them leaving the listen alone is what works.
-var OLD_IPHONE = IOS && (SAFARI ? parseInt(SAFARI, 10) <= 18
-  : !/OS 18_6/.test(UA) && parseInt((UA.match(/OS (\d+)_/) || [])[1], 10) <= 18);
-var closeMic = store('closemic2') ? store('closemic2') === '1' : OLD_IPHONE;
+// Close the microphone while the answer is spoken, and open a new listen after. Kept as a
+// switch for testing: on the iPhones tried so far a listen that is not started by a tap
+// hears nothing, so it is off unless ticked.
+var closeMic = store('closemic2') === '1';
 var afterEnd = null;        // what to do as soon as the listen being closed has really gone
 var probation = 0;          // a listen opened after speaking may be swapped this many times if it hears nothing
 var recycleTimer = null;
@@ -717,10 +874,10 @@ $('closemic').onchange = function () {
   closeMic = this.checked; store('closemic2', closeMic ? '1' : '0');
   log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
 };
-log('version 7, ' + (IOS ? 'iPhone ' + ((UA.match(/OS (\d+[_.]\d+)/) || [])[1] || '').replace('_', '.') +
-  (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
+// An iPhone no longer tells a page its real iOS version, so only Safari's version is shown.
+log('version 9, ' + (IOS ? 'iPhone' + (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
   (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser') +
-  (closeMic ? ', microphone closes to speak' : ', microphone stays open to speak'));
+  (useClips ? ', recorded voice' : ', phone voice') + (closeMic ? ', microphone closes to speak' : ''));
 
 /* ---------- The page outside Google: the list is kept on this phone ---------- */
 function savedList() {
@@ -770,23 +927,30 @@ function parsePasted(text) {
   };
   var c = { wine: col(['wine', 'type']), bay: col(['bay', 'block']), shelf: col(['shelf']),
     seq: col(['seq', 'position', 'pos']), fac: col(['fac', 'facings']),
-    line: col(['lineno', 'line', 'linenumber']), desc: col(['description', 'desc', 'product']) };
+    line: col(['lineno', 'line', 'linenumber']), desc: col(['description', 'desc', 'product']),
+    res: -1, bulk: -1 };
+  // Any heading with "reserve" or "bulk" in it will do for these two.
+  head.forEach(function (h, i) {
+    if (c.res < 0 && h.indexOf('reserve') > -1) c.res = i;
+    else if (c.bulk < 0 && h.indexOf('bulk') > -1 && h.indexOf('reserve') < 0) c.bulk = i;
+  });
   var first = 1;
   // No heading row: take columns A to G in the sheet's usual order.
-  if (c.line < 0) { c = { wine: 0, bay: 1, shelf: 2, seq: 3, fac: 4, line: 5, desc: 6 }; first = 0; }
+  // Without headings there is no telling which later column is which, so reserves and bulk are left out.
+  if (c.line < 0) { c = { wine: 0, bay: 1, shelf: 2, seq: 3, fac: 4, line: 5, desc: 6, res: -1, bulk: -1 }; first = 0; }
   var out = [];
   for (var r = first; r < grid.length; r++) {
     var v = grid[r], line = String(v[c.line] || '').replace(/\D/g, '');
     if (!line) continue;
     out.push({ line: line, wine: txt(v[c.wine]), bay: txt(v[c.bay]), shelf: txt(v[c.shelf]),
-      seq: txt(v[c.seq]), fac: txt(v[c.fac]), desc: txt(v[c.desc]) });
+      seq: txt(v[c.seq]), fac: txt(v[c.fac]), desc: txt(v[c.desc]), res: txt(v[c.res]), bulk: txt(v[c.bulk]) });
   }
   return out;
 }
 
 $('savelist').onclick = function () {
   var data = parsePasted($('paste').value);
-  if (!data.length) { $('listinfo').textContent = 'No line numbers found in that. Copy columns A to G, including the heading row, and paste again.'; return; }
+  if (!data.length) { $('listinfo').textContent = 'No line numbers found in that. Copy every column, including the heading row, and paste again.'; return; }
   $('paste').value = '';
   keepList(data, 'saved');
   $('listbox').open = false;
