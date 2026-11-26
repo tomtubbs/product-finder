@@ -71,9 +71,15 @@
   .tag span { font-weight:400; }
   .tag.res { background:#1d4e6b; }
   .tag.bulk { background:#5b3a78; }
+  .tag.home { background:#2f5d3a; }
+  .tag.store { background:#6b4a1d; }
+  .tag .at { margin-top:4px; }
+  .tag small { display:block; margin-top:2px; font-size:15px; font-weight:400; opacity:.9; }
   #history .h-tag { display:inline-block; margin:4px 6px 0 0; padding:1px 8px; border-radius:8px; font-size:16px; color:#fff; }
   #history .h-tag.res { background:#1d4e6b; }
   #history .h-tag.bulk { background:#5b3a78; }
+  #history .h-tag.home { background:#2f5d3a; }
+  #history .h-tag.store { background:#6b4a1d; }
   .miss { font-size:22px; color:#ff8a80; font-weight:700; }
   #problem { display:none; margin-top:12px; padding:14px; border-radius:12px; background:#5a1f1a; color:#fff; font-size:16px; line-height:1.4; }
   #problem b { display:block; font-size:18px; margin-bottom:6px; }
@@ -110,7 +116,7 @@
   <button type="button" id="droplist">Remove the list from this phone</button>
 </details>
 <details id="diag">
-  <summary>Details for Claude (version 9)</summary>
+  <summary>Details for Claude (version 10)</summary>
   <label><input type="checkbox" id="closemic"> Close the microphone while the answer is spoken</label>
   <label id="cliprow" hidden><input type="checkbox" id="clips"> <span>Use the recorded voice<small>Not yet tried on a real phone</small></span></label>
   <pre id="log"></pre>
@@ -162,7 +168,7 @@ function setRows(data) {
   } else {
     hint(voice + keys);
   }
-  status(data.length + ' lines loaded.');
+  status(data.length + ' lines' + (locCount ? ' and ' + locCount + ' locations' : '') + ' loaded.');
   if (IN_GOOGLE && SPEAK_PAGE && data.length) offerHandover(data, canListen);
   focusBox();
 }
@@ -200,10 +206,27 @@ function pipe(bytes, stream) {
   return new Response(stream.readable).arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
 }
 /** The list as text that fits in a link: "z." squashed, or "j." plain. */
+var FIELDS = ['line', 'wine', 'bay', 'shelf', 'seq', 'fac', 'desc', 'res', 'bulk', 'units', 'lockup', 'upstairs', 'home', 'resloc'];
+var LOC_FIELDS = ['code', 'type', 'shelves', 'holds', 'notes'];
+/** Each row as a short list of values in a fixed order, with empty ones on the end left off. */
+function slim(list, fields) {
+  return list.map(function (r) {
+    var a = fields.map(function (f) { return txt(r[f]); });
+    while (a.length > 1 && a[a.length - 1] === '') a.pop();
+    return a;
+  });
+}
+function fat(list, fields) {
+  return (list || []).map(function (a) {
+    var r = {};
+    fields.forEach(function (f, i) { r[f] = txt(a[i]); });
+    return r;
+  });
+}
 function packRows(data) {
-  var bytes = new TextEncoder().encode(JSON.stringify(data.map(function (r) {
-    return [r.line, r.wine, r.bay, r.shelf, r.seq, r.fac, r.desc, txt(r.res), txt(r.bulk)];
-  })));
+  // The lines alone, as before, or the lines and the storage locations together.
+  var body = slim(data, FIELDS), spots = slim(locList(), LOC_FIELDS);
+  var bytes = new TextEncoder().encode(JSON.stringify(spots.length ? { r: body, l: spots } : body));
   var plain = function () { return 'j.' + b64(bytes); };
   if (!window.CompressionStream || !window.DecompressionStream) return Promise.resolve(plain());
   try {
@@ -214,12 +237,14 @@ function unpackRows(packed) {
   var bytes = unb64(packed.slice(2));
   var ready = packed.charAt(0) === 'z' ? pipe(bytes, new DecompressionStream('deflate-raw')) : Promise.resolve(bytes);
   return ready.then(function (b) {
-    var list = JSON.parse(new TextDecoder().decode(b)), out = [];
-    list.forEach(function (a) {
-      var line = String(a[0] || '').replace(/\D/g, '');
-      if (line) out.push({ line: line, wine: txt(a[1]), bay: txt(a[2]), shelf: txt(a[3]), seq: txt(a[4]), fac: txt(a[5]), desc: txt(a[6]), res: txt(a[7]), bulk: txt(a[8]) });
+    var got = JSON.parse(new TextDecoder().decode(b)), out = [];
+    // A link from an older page is just the list of lines.
+    var list = Array.isArray(got) ? got : got.r, spots = Array.isArray(got) ? [] : got.l;
+    fat(list, FIELDS).forEach(function (r) {
+      r.line = r.line.replace(/\D/g, '');
+      if (r.line) out.push(r);
     });
-    return out;
+    return { rows: out, locs: fat(spots, LOC_FIELDS) };
   });
 }
 function txt(v) { return v === undefined || v === null ? '' : String(v).trim(); }
@@ -314,8 +339,80 @@ function mark(v, cases) {
   }
   return v;
 }
-function tagHtml(cls, name, m) {
-  return m ? '<div class="tag ' + cls + '">' + name + (m === true ? '' : '<span> - ' + esc(m) + '</span>') + '</div>' : '';
+function tagHtml(cls, name, m, more) {
+  return m ? '<div class="tag ' + cls + '">' + name + (m === true ? '' : '<span> - ' + esc(m) + '</span>') + (more || '') + '</div>' : '';
+}
+
+/* ---------- Storage locations ---------- */
+// A line can carry a Home Location and a Reserve Location: short codes such as A7 or D13.
+// The spreadsheet may also have a Locations tab, one row per code, saying whether the place
+// is a cage or a pallet, how many shelves are above it, and which layouts' reserves it holds.
+var locs = {}, locCount = 0;
+function locKey(code) { return txt(code).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+/** Layout names are compared loosely: capitals, spaces and a final "s" make no difference. */
+function layoutKey(name) { return txt(name).toLowerCase().replace(/[^a-z0-9]/g, '').replace(/s$/, ''); }
+function setLocs(list) {
+  locs = {}; locCount = 0;
+  (list || []).forEach(function (l) {
+    var k = locKey(l.code);
+    if (!k || locs[k]) return;
+    locs[k] = { code: txt(l.code), type: txt(l.type), shelves: txt(l.shelves), holds: txt(l.holds), notes: txt(l.notes) };
+    locCount++;
+  });
+}
+function locList() { return Object.keys(locs).map(function (k) { return locs[k]; }); }
+/** The places named in a Home Location or Reserve Location cell. "D13, C4" is two places. */
+function places(cell) {
+  cell = txt(cell);
+  if (!cell || /^(false|no|n|-|none|n\/a|na|0)$/i.test(cell)) return [];
+  return cell.split(/\s*[,;&+\n]\s*|\s+and\s+/i).map(txt).filter(Boolean);
+}
+/** Places whose row on the Locations tab says they hold reserves for this layout.
+ *  A layout there can carry a note in brackets, e.g. "White wine (upper shelf)". */
+function placesFor(layout) {
+  var want = layoutKey(layout), out = [];
+  if (!want) return out;
+  locList().forEach(function (l) {
+    l.holds.split(/\s*[,;\n]\s*/).forEach(function (h) {
+      var m = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(h);
+      if (layoutKey(m ? m[1] : h) === want) out.push(l.code + (m && txt(m[2]) ? ' ' + txt(m[2]) : ''));
+    });
+  });
+  return out;
+}
+/** What the Locations tab says about a place, e.g. "Pallet, 2 shelves above". '' if it is not there. */
+function locDetail(place) {
+  var l = locs[locKey(place)] || locs[locKey(txt(place).split(/\s+/)[0])];
+  if (!l) return '';
+  var bits = [], s = l.shelves;
+  if (l.type) bits.push(l.type);
+  if (/^\d+$/.test(s)) bits.push(+s === 0 ? 'no shelves above' : +s === 1 ? '1 shelf above' : +s + ' shelves above');
+  else if (/^(yes|y|true|x)$/i.test(s)) bits.push('shelving above');
+  else if (/^(no|n|false|none|-)$/i.test(s)) bits.push('no shelves above');
+  else if (s) bits.push(s);
+  if (l.notes) bits.push(l.notes);
+  var t = bits.join(', ');
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+/** Small print under a marker: what each place is. */
+function placeLines(list) {
+  var out = '';
+  list.forEach(function (p) {
+    var d = locDetail(p);
+    if (d) out += '<small>' + (list.length > 1 ? '<b>' + esc(p) + '</b> · ' : '') + esc(d) + '</small>';
+  });
+  return out;
+}
+/** A code read out letter then number: "D13" is said as "D 13". */
+function sayPlace(p) { return p.replace(/([A-Za-z])(\d)/g, '$1 $2'); }
+/** Everything the sheet says about one row beyond its bay, shelf and position. */
+function extras(r) {
+  var e = { res: mark(r.res, true), bulk: mark(r.bulk), lockup: !!mark(r.lockup), upstairs: !!mark(r.upstairs),
+    home: places(r.home), resAt: places(r.resloc), byLayout: false, spare: [], units: mark(r.units) };
+  if (!e.res) { e.spare = e.resAt; e.resAt = []; }      // a reserve location, but no reserves marked
+  // No reserve location on the line itself: the Locations tab may say where this layout's reserves are.
+  else if (!e.resAt.length) { e.resAt = placesFor(r.wine); e.byLayout = e.resAt.length > 0; }
+  return e;
 }
 
 function showLine(line) {
@@ -323,41 +420,59 @@ function showLine(line) {
   // The same answer as a run of recorded clips: the digits, then bay, shelf and position.
   var clips = digitClips(line).concat([0.18]);
   hits.forEach(function (r, i) {
-    var res = mark(r.res, true), bulk = mark(r.bulk);
+    var e = extras(r), res = e.res, bulk = e.bulk, small = [];
+    if (r.fac) small.push(esc(r.fac) + ' facing' + (r.fac == 1 ? '' : 's'));
+    if (e.units && e.units !== true) small.push(esc(e.units) + (/^\d+$/.test(e.units) ? (e.units == 1 ? ' unit' : ' units') + ' per case' : ''));
+    if (e.spare.length) small.push('Reserve location ' + esc(e.spare.join(', ')) + ' (no reserves marked)');
     html += '<div class="line">Line ' + esc(r.line) + (r.wine ? ' · ' + esc(r.wine) : '') + '</div>' +
       '<div class="desc">' + esc(r.desc) + '</div>' +
       (r.bay || r.shelf || r.seq ? '<div class="loc">' +
         (r.bay ? '<div class="bay"><small>Bay</small><b>' + esc(r.bay) + '</b></div>' : '') +
         (r.shelf ? '<div><small>Shelf</small><b>' + esc(r.shelf) + '</b></div>' : '') +
         (r.seq ? '<div><small>Position</small><b>' + esc(r.seq) + '</b></div>' : '') + '</div>' : '') +
-      tagHtml('res', 'Reserves', res) + tagHtml('bulk', 'Bulk stock', bulk) +
-      (r.fac ? '<div class="extra">' + esc(r.fac) + ' facing' + (r.fac == 1 ? '' : 's') + '</div>' : '');
+      tagHtml('store', 'Store in Lockup', e.lockup) + tagHtml('store', 'Store Upstairs', e.upstairs) +
+      tagHtml('home', 'Home location', e.home.join(', '), placeLines(e.home)) +
+      tagHtml('res', 'Reserves', res, e.resAt.length ? '<div class="at">' +
+        (e.byLayout ? esc(r.wine) + ' reserves' : 'Reserve location') + '<span> - ' + esc(e.resAt.join(', ')) + '</span></div>' +
+        placeLines(e.resAt) : '') +
+      tagHtml('bulk', 'Bulk stock', bulk) +
+      (small.length ? '<div class="extra">' + small.join(' · ') + '</div>' : '');
     // Lines outside the shelved layouts may have no bay, shelf or position: say what there is.
     var where = [];
     if (r.bay) where.push('Bay ' + r.bay);
     if (r.shelf) where.push('shelf ' + r.shelf);
     if (r.seq) where.push('position ' + r.seq);
     var parts = where.length ? [where.join(', ')] : [];
-    if (res) parts.push('Reserves' + (res === true ? '' : ', ' + res));
+    if (e.lockup) parts.push('Store in lockup');
+    if (e.upstairs) parts.push('Store upstairs');
+    if (e.home.length) parts.push('Home location ' + e.home.map(sayPlace).join(' and '));
+    if (res) parts.push('Reserves' + (res === true ? '' : ', ' + res) +
+      (e.resAt.length ? ', ' + e.resAt.map(sayPlace).join(' and ') : ''));
     if (bulk) parts.push('Bulk stock' + (bulk === true ? '' : ', ' + bulk));
     spoken.push(parts.length ? parts.join('. ') : 'No location in the sheet');
-    if (i) clips.push('also');
-    if (r.bay) clips.push(clipFor('b', r.bay));
-    if (r.shelf) clips.push(clipFor('s', r.shelf));
-    if (r.seq) clips.push(clipFor('p', r.seq));
-    if (!parts.length) clips.push('?');        // nothing recorded for this: the phone's voice says it
-    // The recorded voice only says that there are reserves or bulk stock; the place is on screen.
-    if (res) clips.push('res');
-    if (bulk) clips.push('bulk');
+    // The recorded voice says the bay, shelf and position, and that there are reserves or bulk
+    // stock. Lockup, upstairs and the home and reserve locations are on screen only.
+    var mine = [];
+    if (r.bay) mine.push(clipFor('b', r.bay));
+    if (r.shelf) mine.push(clipFor('s', r.shelf));
+    if (r.seq) mine.push(clipFor('p', r.seq));
+    if (res) mine.push('res');
+    if (bulk) mine.push('bulk');
+    if (!mine.length) mine.push('?');          // nothing recorded for this: the phone's voice says it
+    clips = clips.concat(i ? ['also'] : [], mine);
   });
   $('result').innerHTML = html;
   if (line !== lastShown) {
-    var r0 = hits[0], li = document.createElement('li'), res0 = mark(r0.res, true), bulk0 = mark(r0.bulk);
+    var r0 = hits[0], li = document.createElement('li'), e0 = extras(r0), res0 = e0.res, bulk0 = e0.bulk;
     li.innerHTML = '<div><b>' + esc(r0.line) + '</b>' + (r0.wine ? ' · ' + esc(r0.wine) : '') + '</div>' +
       '<div class="h-loc">' + (r0.bay ? '<span>Bay <b>' + esc(r0.bay) + '</b></span> ' : '') +
       (r0.shelf ? '<span>Shelf <b>' + esc(r0.shelf) + '</b></span> ' : '') +
       (r0.seq ? '<span>Position <b>' + esc(r0.seq) + '</b></span>' : '') + '</div>' +
-      (res0 ? '<span class="h-tag res">Reserves' + (res0 === true ? '' : ' - ' + esc(res0)) + '</span>' : '') +
+      (e0.lockup ? '<span class="h-tag store">Lockup</span>' : '') +
+      (e0.upstairs ? '<span class="h-tag store">Upstairs</span>' : '') +
+      (e0.home.length ? '<span class="h-tag home">Home ' + esc(e0.home.join(', ')) + '</span>' : '') +
+      (res0 ? '<span class="h-tag res">Reserves' + (res0 === true ? '' : ' - ' + esc(res0)) +
+        (e0.resAt.length ? ' · ' + esc(e0.resAt.join(', ')) : '') + '</span>' : '') +
       (bulk0 ? '<span class="h-tag bulk">Bulk stock' + (bulk0 === true ? '' : ' - ' + esc(bulk0)) + '</span>' : '') +
       '<div>' + esc(r0.desc) + '</div>';
     $('history').insertBefore(li, $('history').firstChild);
@@ -875,7 +990,7 @@ $('closemic').onchange = function () {
   log('close the microphone while speaking: ' + (closeMic ? 'on' : 'off'));
 };
 // An iPhone no longer tells a page its real iOS version, so only Safari's version is shown.
-log('version 9, ' + (IOS ? 'iPhone' + (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
+log('version 10, ' + (IOS ? 'iPhone' + (OTHER_BROWSER ? ', not Safari' : ', Safari' + (SAFARI ? ' ' + SAFARI : '')) : 'not iPhone') +
   (IN_GOOGLE ? ', inside Google' : ', outside Google') + (SR ? '' : ', no listening in this browser') +
   (useClips ? ', recorded voice' : ', phone voice') + (closeMic ? ', microphone closes to speak' : ''));
 
@@ -884,25 +999,29 @@ function savedList() {
   try { var v = JSON.parse(localStorage.getItem('wf_rows')); return v && v.rows && v.rows.length ? v : null; } catch (e) { return null; }
 }
 /** Use this list from now on and keep it on the phone. */
-function keepList(data, how) {
+function keepList(data, how, spots) {
   var kept = true;
-  try { localStorage.setItem('wf_rows', JSON.stringify({ at: Date.now(), rows: data })); } catch (e) { kept = false; }
+  // A list from the sheet brings its storage locations with it. A list pasted in by hand
+  // has none, so the ones already on the phone stay.
+  if (spots) setLocs(spots);
+  try { localStorage.setItem('wf_rows', JSON.stringify({ at: Date.now(), rows: data, locs: locList() })); } catch (e) { kept = false; }
   setRows(data);
   listInfo();
-  status(data.length + ' lines ' + how + '.' + (kept ? '' : ' This phone would not keep them, so they last until the page is closed.'));
+  status(data.length + ' lines' + (locCount ? ' and ' + locCount + ' locations ' : ' ') + how + '.' + (kept ? '' : ' This phone would not keep them, so they last until the page is closed.'));
 }
 function listInfo() {
   var v = savedList(), box = $('listbox');
   box.hidden = false;
   if (!v) { $('listinfo').textContent = rows.length ? rows.length + ' lines in use, not kept on this phone.' : 'No list on this phone.'; return; }
   var d = new Date(v.at);
-  $('listinfo').textContent = v.rows.length + ' lines kept on this phone, last updated ' +
+  $('listinfo').textContent = v.rows.length + ' lines' + (v.locs && v.locs.length ? ' and ' + v.locs.length + ' locations' : '') +
+    ' kept on this phone, last updated ' +
     d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ' at ' +
     d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + '. ' +
     'To update it, open your Google Wine finder page and tap Open the speaking page.';
 }
 function noList(why) {
-  rows = []; byLine = {};
+  rows = []; byLine = {}; setLocs([]);
   document.body.classList.add('nolist');
   $('result').innerHTML = '<div class="line" id="hint"></div>';
   $('history').innerHTML = ''; lastShown = '';
@@ -928,22 +1047,28 @@ function parsePasted(text) {
   var c = { wine: col(['wine', 'type']), bay: col(['bay', 'block']), shelf: col(['shelf']),
     seq: col(['seq', 'position', 'pos']), fac: col(['fac', 'facings']),
     line: col(['lineno', 'line', 'linenumber']), desc: col(['description', 'desc', 'product']),
-    res: -1, bulk: -1 };
-  // Any heading with "reserve" or "bulk" in it will do for these two.
+    res: -1, bulk: -1, units: -1, lockup: -1, upstairs: -1, home: -1, resloc: -1 };
+  // The optional columns are found by a word in their heading, wherever they sit:
+  // "reserve" with "location", "reserve", "bulk", "home", "lockup" or "downstairs", "upstairs", "unit".
+  var taken = Object.keys(c).map(function (k) { return c[k]; });
   head.forEach(function (h, i) {
-    if (c.res < 0 && h.indexOf('reserve') > -1) c.res = i;
-    else if (c.bulk < 0 && h.indexOf('bulk') > -1 && h.indexOf('reserve') < 0) c.bulk = i;
+    if (taken.indexOf(i) > -1) return;
+    var has = function (w) { return h.indexOf(w) > -1; };
+    var k = has('reserve') ? (has('loc') ? 'resloc' : 'res') : has('bulk') ? 'bulk' : has('home') ? 'home'
+      : has('lockup') || has('downstairs') ? 'lockup' : has('upstairs') ? 'upstairs' : has('unit') ? 'units' : '';
+    if (k && c[k] < 0) c[k] = i;
   });
   var first = 1;
   // No heading row: take columns A to G in the sheet's usual order.
-  // Without headings there is no telling which later column is which, so reserves and bulk are left out.
-  if (c.line < 0) { c = { wine: 0, bay: 1, shelf: 2, seq: 3, fac: 4, line: 5, desc: 6, res: -1, bulk: -1 }; first = 0; }
+  // Without headings there is no telling which later column is which, so the optional ones are left out.
+  if (c.line < 0) { Object.keys(c).forEach(function (k) { c[k] = -1; }); c.wine = 0; c.bay = 1; c.shelf = 2; c.seq = 3; c.fac = 4; c.line = 5; c.desc = 6; first = 0; }
   var out = [];
   for (var r = first; r < grid.length; r++) {
     var v = grid[r], line = String(v[c.line] || '').replace(/\D/g, '');
     if (!line) continue;
-    out.push({ line: line, wine: txt(v[c.wine]), bay: txt(v[c.bay]), shelf: txt(v[c.shelf]),
-      seq: txt(v[c.seq]), fac: txt(v[c.fac]), desc: txt(v[c.desc]), res: txt(v[c.res]), bulk: txt(v[c.bulk]) });
+    var row = { line: line };
+    FIELDS.forEach(function (f) { if (f !== 'line') row[f] = txt(v[c[f]]); });
+    out.push(row);
   }
   return out;
 }
@@ -964,28 +1089,37 @@ $('droplist').onclick = function () {
 /** Outside Google: take a list handed over in the link, or the one kept on the phone. */
 function bootOutside() {
   var packed = location.hash.slice(1);
-  var useSaved = function (why) { var v = savedList(); if (v) { setRows(v.rows); listInfo(); } else noList(why); };
+  var useSaved = function (why) { var v = savedList(); if (v) { setLocs(v.locs); setRows(v.rows); listInfo(); } else noList(why); };
   if (!/^[zj]\./.test(packed)) { useSaved(); return; }
   // Take the list out of the address bar straight away, so it is not left in a bookmark.
   try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
   var bad = 'That link did not carry a list this page could read.';
   try {
-    unpackRows(packed).then(function (data) {
-      if (data.length) keepList(data, 'brought over from your sheet'); else useSaved(bad);
+    unpackRows(packed).then(function (d) {
+      if (d.rows.length) keepList(d.rows, 'brought over from your sheet', d.locs); else useSaved(bad);
     }, function () { useSaved(bad); });
   } catch (e) { useSaved(bad); }
 }
 
 if (IN_GOOGLE) {
   google.script.url.getLocation(function (loc) {
-    google.script.run.withSuccessHandler(setRows)
-      .withFailureHandler(function (err) {
+    var key = (loc.parameter && loc.parameter.key) || '';
+    // getData brings the lines and the Locations tab together. A Code.gs from before
+    // version 10 only has getRows, so that is asked instead.
+    var ask = function (fn) {
+      var run = google.script.run.withSuccessHandler(function (d) {
+        if (!d || Array.isArray(d)) setRows(d || []); else { setLocs(d.locs); setRows(d.rows || []); }
+      }).withFailureHandler(function (err) {
+        if (fn === 'getData') { ask('getRows'); return; }
         $('mic').textContent = 'Not loaded'; $('typed').placeholder = 'Not loaded';
         $('hint').textContent = 'Could not load the sheet: ' + err.message;
-      })
-      .getRows((loc.parameter && loc.parameter.key) || '');
+      });
+      if (typeof run[fn] === 'function') run[fn](key); else if (fn === 'getData') ask('getRows');
+    };
+    ask('getData');
   });
 } else if (window.__TEST_ROWS__) {
+  setLocs(window.__TEST_LOCS__);
   setRows(window.__TEST_ROWS__);
 } else {
   bootOutside();
